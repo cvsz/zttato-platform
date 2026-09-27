@@ -19,6 +19,8 @@ class Settings:
     legal_address: str
     media_dir: str
     max_video_bytes: int
+    zwallet_adapter_url: str = ""
+    z_platform_service_token: str = ""
 
     @property
     def redirect_uri(self) -> str:
@@ -44,6 +46,39 @@ def validate_host_config(s: Settings) -> None:
         raise ValueError("APP_ALLOWED_HOSTS must include the APP_BASE_URL hostname")
 
 
+def validate_zwallet_config(s: Settings) -> None:
+    """Validate the optional server-to-server ZWallet adapter connection."""
+    adapter_url = s.zwallet_adapter_url.strip()
+    service_token = s.z_platform_service_token
+    if not adapter_url:
+        return
+    if adapter_url != s.zwallet_adapter_url:
+        raise ValueError("ZWALLET_ADAPTER_URL must not contain surrounding whitespace")
+    if service_token and service_token != service_token.strip():
+        raise ValueError("Z_PLATFORM_SERVICE_TOKEN must not contain surrounding whitespace")
+    try:
+        parsed = urlparse(adapter_url)
+        host = parsed.hostname
+        _ = parsed.port  # Validate malformed port values.
+    except ValueError as exc:
+        raise ValueError("ZWALLET_ADAPTER_URL must be a valid absolute URL") from exc
+    if (
+        parsed.scheme not in ("http", "https")
+        or not host
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("ZWALLET_ADAPTER_URL must be an absolute HTTP(S) URL without credentials or query")
+    if not service_token or service_token.startswith("REPLACE_"):
+        return
+    if len(service_token) > 8192 or any(ord(char) < 33 or ord(char) > 126 for char in service_token):
+        raise ValueError("Z_PLATFORM_SERVICE_TOKEN must contain printable ASCII without spaces")
+    if s.env == "production" and parsed.scheme != "https" and host.lower() not in ("localhost", "127.0.0.1", "::1"):
+        raise ValueError("Production ZWallet adapter URLs must use HTTPS")
+
+
 def load_settings() -> Settings:
     get = os.environ.get
     s = Settings(
@@ -65,8 +100,11 @@ def load_settings() -> Settings:
         legal_address=get("LEGAL_POSTAL_ADDRESS", ""),
         media_dir=get("MEDIA_DIR", "./media"),
         max_video_bytes=int(get("MAX_VIDEO_BYTES", "67108864")),
+        zwallet_adapter_url=get("ZWALLET_ADAPTER_URL", "").strip().rstrip("/"),
+        z_platform_service_token=get("Z_PLATFORM_SERVICE_TOKEN", ""),
     )
     validate_host_config(s)
+    validate_zwallet_config(s)
     u = urlparse(s.base_url)
     if s.env == "production":
         if u.scheme != "https":

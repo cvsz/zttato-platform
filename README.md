@@ -41,6 +41,7 @@ Affiliate Analytics
 - [Architecture Boundaries](docs/ARCHITECTURE_BOUNDARIES.md) — mandatory separation of Commerce, Affiliate, Content/Media, Distribution and TikTok.
 - [TikTok Review Evidence](docs/TIKTOK_REVIEW.md)
 - [TikTok Media Transfer Contract](docs/TIKTOK_MEDIA_TRANSFER.md) — official FILE_UPLOAD chunking, upload destinations, tests and remaining real Sandbox evidence.
+- [zWallet Invoice-Intent Integration](docs/ZWALLET_INTEGRATION.md) — optional server-side invoice creation boundary; does not represent a settled payment or gate publishing.
 - [Operations](docs/OPERATIONS.md)
 - [Production Gates](docs/PRODUCTION_GATES.md)
 - [Release Protection](docs/RELEASE_PROTECTION.md) — branch/ruleset requirements, SBOM/vulnerability scan and artifact provenance release gate.

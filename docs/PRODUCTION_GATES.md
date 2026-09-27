@@ -148,6 +148,13 @@ Affiliate readiness is independent of TikTok readiness.
 - [ ] Representative encrypted-token restore test is completed without exposing token values.
 - [ ] Rollback has been rehearsed for a schema-compatible release.
 
+## P1 — optional zWallet invoice intents
+
+- [ ] Adapter URL and service token are supplied through approved runtime configuration and secret storage.
+- [ ] Live adapter-to-ledger idempotency, tenant scoping, and timeout behavior are verified.
+- [ ] Payment processor completion and ledger settlement are evidenced before any balance or usage feature is advertised.
+- [ ] A durable Workspace/Tenant identity replaces session-level scoping before billing identities must survive browser-session changes.
+
 ## CI acceptance
 
 - [ ] CI runs on an assigned GitHub runner and all required jobs pass.
