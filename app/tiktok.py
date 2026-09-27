@@ -160,6 +160,7 @@ class TikTokClient:
         brand_content_toggle: bool = False,
         brand_organic_toggle: bool = False,
         is_aigc: bool = False,
+        thumbnail_timestamp: int | None = None,
         transfer_method: str = "FILE_UPLOAD",
         video_url: str | None = None,
     ) -> tuple[str, str]:
@@ -175,6 +176,8 @@ class TikTokClient:
                 "brand_organic_toggle": brand_organic_toggle,
                 "is_aigc": is_aigc,
             }
+            if thumbnail_timestamp is not None:
+                post_info["thumbnail_timestamp"] = thumbnail_timestamp
             request = {"post_info": post_info}
         elif mode == "draft":
             endpoint, request = "/v2/post/publish/inbox/video/init/", {}
@@ -222,6 +225,7 @@ class TikTokClient:
         is_aigc: bool = False,
         photo_images: list[str],
         photo_cover_index: int,
+        photo_mode: str = "photo",  # "photo" or "photo_slideshow"
     ) -> tuple[str, str]:
         post_info = {"description": caption}
         if mode == "direct":
@@ -243,11 +247,12 @@ class TikTokClient:
             "photo_images": photo_images,
             "photo_cover_index": photo_cover_index,
         }
+        media_type = "PHOTO" if photo_mode == "photo" else "PHOTO_SLIDESHOW"
         request = {
             "post_info": post_info,
             "source_info": source_info,
             "post_mode": "DIRECT_POST" if mode == "direct" else "MEDIA_UPLOAD",
-            "media_type": "PHOTO",
+            "media_type": media_type,
             "is_aigc": is_aigc,
         }
         payload = await self._request("POST", self.API + endpoint, token=access_token, data=request)

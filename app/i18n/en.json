@@ -56,6 +56,8 @@
       "own_brand": "This video promotes my own business",
       "paid_brand": "This video is a paid partnership",
       "ai_content": "This video contains AI-generated content",
+      "thumbnail_timestamp_label": "Thumbnail timestamp (seconds)",
+      "thumbnail_timestamp_help": "Choose a custom thumbnail frame from the video",
       "drop_title": "Drop an MP4 here or click to browse",
       "drop_help": "Only MP4 · maximum 64 MiB · never upload sensitive content",
       "draft_help": "Upload a draft and finish editing and posting from your TikTok inbox.",
@@ -84,7 +86,12 @@
       "photo_disclosure": "Content disclosure",
       "photo_own_brand": "This photo post promotes my own business",
       "photo_paid_brand": "This photo post is a paid partnership",
-      "photo_ai_content": "This photo set contains AI-generated content"
+      "photo_ai_content": "This photo set contains AI-generated content",
+      "photo_mode_label": "Photo post type",
+      "photo_mode_photo": "Standard Photo Post",
+      "photo_mode_slideshow": "Photo Slideshow (auto-play with music)",
+      "photo_mode_photo_help": "Standard photo carousel post",
+      "photo_mode_slideshow_help": "Auto-playing slideshow with TikTok music"
     },
     "review": {
       "title": "3 · Review and confirm",
@@ -93,15 +100,19 @@
       "summary_none": "Upload media first. ",
       "summary_draft": "The video goes to your TikTok inbox, where you finish editing and posting.",
       "summary_direct": "Direct Post will use the current TikTok visibility setting and any checked disclosures.",
+      "summary_scheduled": "This post is scheduled for {time}. It will be sent automatically.",
       "summary_none_media": "Upload media first. ",
       "confirmation": "No transfer occurs until you confirm.",
       "consent": "I reviewed the selected content, privacy setting and disclosures. I expressly consent to sending this to TikTok.",
       "publish_button": "Send to TikTok",
+      "schedule_button": "Schedule for later",
+      "schedule_label": "Schedule for",
       "note": "Draft: finish posting from TikTok inbox. Direct: TikTok processes the post and applies account/API restrictions.",
       "status": "No content sent.",
       "refresh": "Refresh TikTok status",
       "draft": "Draft",
-      "direct": "Direct Post"
+      "direct": "Direct Post",
+      "scheduled": "Scheduled"
     },
     "account": {
       "title": "Account controls",
@@ -251,6 +262,25 @@
     "error_url": "Enter a valid HTTPS photo URL without spaces, credentials, fragments or redirects.",
     "error_format": "TikTok Photo Post supports JPEG and WebP image URLs only.",
     "error_caption": "Caption exceeds 4000 characters."
+  },
+  "preflight": {
+    "title": "Media Preflight Check",
+    "run_button": "Run Preflight Check",
+    "checking": "Checking media against TikTok requirements…",
+    "overall_pass": "All checks passed",
+    "overall_warn": "Some warnings — review before publishing",
+    "overall_fail": "Blocking issues found — fix before publishing",
+    "check_size": "File size",
+    "check_duration": "Video duration",
+    "check_dimensions": "Dimensions",
+    "check_aspect_ratio": "Aspect ratio",
+    "check_format": "Format",
+    "check_photo_count": "Photo count",
+    "check_photo_size": "Photo size",
+    "check_photo_format": "Photo format",
+    "status_pass": "Pass",
+    "status_warn": "Warning",
+    "status_fail": "Fail"
   },
   "publish": {
     "consent_required": "Explicit confirmation is required",

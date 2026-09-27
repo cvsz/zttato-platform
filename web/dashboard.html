@@ -160,6 +160,14 @@
               <label class="choice">
                 <input type="checkbox" id="paid-brand"> <span data-i18n="dashboard.video.paid_brand">This video is a paid partnership</span>
               </label>
+            </fieldset>
+
+            <fieldset>
+              <legend data-i18n="dashboard.video.thumbnail_timestamp_label">Thumbnail</legend>
+              <label for="thumbnail-timestamp" data-i18n="dashboard.video.thumbnail_timestamp_label">Thumbnail timestamp (seconds)</label>
+              <input id="thumbnail-timestamp" type="number" min="0" step="1" placeholder="0" style="width: 100px;">
+              <p class="note" data-i18n="dashboard.video.thumbnail_timestamp_help">Choose a custom thumbnail frame from the video</p>
+            </fieldset>
 </section>
 
         <!-- 2b. Prepare photos (Photo Post) -->
@@ -178,6 +186,19 @@
           </div>
           <label for="photo-cover" data-i18n="dashboard.photo.cover_label">Cover photo index (0-based)</label>
           <input id="photo-cover" type="number" min="0" max="34" value="0" style="width: 80px;">
+          <fieldset>
+            <legend data-i18n="dashboard.photo.photo_mode_label">Photo post type</legend>
+            <label class="choice">
+              <input type="radio" name="photo-type" id="photo-type-photo" value="photo" checked>
+              <span data-i18n="dashboard.photo.photo_mode_photo">Standard Photo Post</span>
+              <small data-i18n="dashboard.photo.photo_mode_photo_help">Standard photo carousel post</small>
+            </label>
+            <label class="choice">
+              <input type="radio" name="photo-type" id="photo-type-slideshow" value="photo_slideshow">
+              <span data-i18n="dashboard.photo.photo_mode_slideshow">Photo Slideshow (auto-play with music)</span>
+              <small data-i18n="dashboard.photo.photo_mode_slideshow_help">Auto-playing slideshow with TikTok music</small>
+            </label>
+          </fieldset>
           <fieldset>
             <legend data-i18n="dashboard.photo.publishing_method">Publishing method</legend>
             <label class="choice">
@@ -229,11 +250,20 @@
             <span data-i18n="dashboard.review.consent">I reviewed the selected content, privacy setting and disclosures. I expressly consent to sending this to TikTok.</span>
           </label>
 
-          <button class="primary full-width" id="publish" type="button" disabled data-i18n="dashboard.review.publish_button">Send to TikTok</button>
+          <div id="schedule-options" class="schedule-options hidden">
+            <label for="scheduled-at" data-i18n="dashboard.review.schedule_label">Schedule for</label>
+            <input id="scheduled-at" type="datetime-local">
+          </div>
+
+          <div class="button-group">
+            <button class="primary full-width" id="publish" type="button" disabled data-i18n="dashboard.review.publish_button">Send to TikTok</button>
+            <button class="secondary full-width" id="schedule" type="button" disabled data-i18n="dashboard.review.schedule_button">Schedule for later</button>
+          </div>
 
           <p class="note tip">
             <strong data-i18n="dashboard.review.draft">Draft</strong> → finish posting from TikTok inbox.<br>
-            <strong data-i18n="dashboard.review.direct">Direct</strong> → TikTok processes the post and applies account/API restrictions.
+            <strong data-i18n="dashboard.review.direct">Direct</strong> → TikTok processes the post and applies account/API restrictions.<br>
+            <strong data-i18n="dashboard.review.scheduled">Scheduled</strong> → sends automatically at the chosen time.
           </p>
 
           <div id="status" class="status" role="status" aria-live="polite" data-i18n="dashboard.review.status">No content sent.</div>

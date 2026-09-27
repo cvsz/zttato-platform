@@ -58,7 +58,9 @@
       "drop_title": "MP4 파일을 여기에 끌어오거나 클릭하여 선택하세요",
       "drop_help": "MP4만 지원 · 최대 64 MiB · 민감한 콘텐츠는 업로드하지 마세요",
       "draft_help": "초안을 업로드한 뒤 TikTok 받은편지함에서 편집과 게시를 마무리하세요.",
-      "direct_help": "확인하면 TikTok이 게시물을 처리하고 계정 및 API 제한을 적용합니다."
+      "direct_help": "확인하면 TikTok이 게시물을 처리하고 계정 및 API 제한을 적용합니다.",
+      "thumbnail_timestamp_label": "Thumbnail timestamp (seconds)",
+      "thumbnail_timestamp_help": "Choose a custom thumbnail frame from the video"
     },
     "photo": {
       "title": "2b · 사진 준비 (사진 게시)",
@@ -83,7 +85,12 @@
       "photo_disclosure": "콘텐츠 공개",
       "photo_own_brand": "이 사진 게시물은 내 비즈니스를 홍보합니다",
       "photo_paid_brand": "이 사진 게시물은 유료 파트너십입니다",
-      "photo_ai_content": "이 사진 세트에는 AI 생성 콘텐츠가 포함되어 있습니다"
+      "photo_ai_content": "이 사진 세트에는 AI 생성 콘텐츠가 포함되어 있습니다",
+      "photo_mode_label": "Photo post type",
+      "photo_mode_photo": "Standard Photo Post",
+      "photo_mode_slideshow": "Photo Slideshow (auto-play with music)",
+      "photo_mode_photo_help": "Standard photo carousel post",
+      "photo_mode_slideshow_help": "Auto-playing slideshow with TikTok music"
     },
     "review": {
       "title": "3 · 검토 및 확인",
@@ -100,7 +107,11 @@
       "status": "전송된 콘텐츠 없음.",
       "refresh": "TikTok 상태 새로고침",
       "draft": "초안",
-      "direct": "직접 게시"
+      "direct": "직접 게시",
+      "schedule_label": "Schedule for",
+      "schedule_button": "Schedule for later",
+      "summary_scheduled": "This post is scheduled for {time}. It will be sent automatically.",
+      "scheduled": "Scheduled"
     },
     "account": {
       "title": "계정 관리",
@@ -304,5 +315,24 @@
     "photo_https_required": "사진 URL은 HTTPS를 사용해야 합니다",
     "idempotent_replay": " (동일 요청, 중복되지 않음)",
     "error_unknown": "요청 실패 ({status})"
+  },
+  "preflight": {
+    "title": "Media Preflight Check",
+    "run_button": "Run Preflight Check",
+    "checking": "Checking media against TikTok requirements…",
+    "overall_pass": "All checks passed",
+    "overall_warn": "Some warnings — review before publishing",
+    "overall_fail": "Blocking issues found — fix before publishing",
+    "check_size": "File size",
+    "check_duration": "Video duration",
+    "check_dimensions": "Dimensions",
+    "check_aspect_ratio": "Aspect ratio",
+    "check_format": "Format",
+    "check_photo_count": "Photo count",
+    "check_photo_size": "Photo size",
+    "check_photo_format": "Photo format",
+    "status_pass": "Pass",
+    "status_warn": "Warning",
+    "status_fail": "Fail"
   }
 }

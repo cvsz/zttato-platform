@@ -238,12 +238,27 @@
     $("direct-options")?.classList.toggle("hidden", !direct || activeMediaType !== "video");
     $("photo-direct-options")?.classList.toggle("hidden", !direct || activeMediaType !== "photo");
 
+    // Show schedule options only for direct mode
+    const scheduleOpts = $("schedule-options");
+    if (scheduleOpts) {
+      scheduleOpts.classList.toggle("hidden", !direct);
+    }
+
+    // Set min datetime for scheduling to now
+    const scheduledInput = $("scheduled-at");
+    if (scheduledInput) {
+      const now = new Date();
+      now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+      scheduledInput.min = now.toISOString().slice(0, 16);
+    }
+
     const ready =
       Boolean(activeMediaId()) &&
       Boolean($("consent")?.checked) &&
       !sending;
 
     const publish = $("publish");
+    const scheduleBtn = $("schedule");
     if (publish) {
       const modeControl = $(activeMediaType === "photo" ? "photo-mode-direct" : "mode-direct");
       const draftControl = $(activeMediaType === "photo" ? "photo-mode-draft" : "mode-draft");
@@ -257,6 +272,9 @@
       );
 
       publish.disabled = !ready || directBlocked || draftBlocked;
+      if (scheduleBtn) {
+        scheduleBtn.disabled = !ready || directBlocked || draftBlocked;
+      }
     }
 
     buildSummary();
@@ -610,7 +628,8 @@
   for (const id of ["mode-draft", "mode-direct", "privacy", "consent",
                     "own-brand", "paid-brand", "ai-content",
                     "photo-mode-draft", "photo-mode-direct", "photo-privacy",
-                    "photo-disable-comment", "photo-own-brand", "photo-paid-brand", "photo-ai-content"]) {
+                    "photo-disable-comment", "photo-own-brand", "photo-paid-brand", "photo-ai-content",
+                    "photo-type-photo", "photo-type-slideshow", "scheduled-at"]) {
     const el = $(id);
     if (el) {
       el.addEventListener("change", () => {
@@ -618,7 +637,7 @@
           review();
           return;
         }
-        activateMediaType(id.startsWith("photo-") ? "photo" : "video");
+        if (id.startsWith("photo-")) activateMediaType("photo");
         resetIntent(true);
         review();
       });
@@ -626,6 +645,14 @@
   }
 
   $("publish").addEventListener("click", async () => {
+    await submitPublish("publish");
+  });
+
+  $("schedule").addEventListener("click", async () => {
+    await submitPublish("schedule");
+  });
+
+  async function submitPublish(action) {
     const selectedMediaId = activeMediaId();
     if (sending || !selectedMediaId || !$("consent").checked) return;
     if (!idempotencyKey) idempotencyKey = crypto.randomUUID();
@@ -635,20 +662,38 @@
     report("Queueing your confirmed request securely…");
 
     const isPhoto = activeMediaType === "photo";
+    const currentMode = mode();
+    const isScheduled = action === "schedule";
+
+    // Get scheduled timestamp if scheduling
+    let scheduledAt = null;
+    if (isScheduled) {
+      const scheduledInput = $("scheduled-at");
+      if (!scheduledInput || !scheduledInput.value) {
+        report("Please select a date and time for scheduling.", true);
+        sending = false;
+        review();
+        return;
+      }
+      scheduledAt = Math.floor(new Date(scheduledInput.value).getTime() / 1000);
+    }
+
     const payload = {
       media_id: selectedMediaId,
-      media_type: activeMediaType,
-      mode: mode(),
+      media_type: isPhoto ? $("photo-type-photo").checked ? "photo" : "photo_slideshow" : "video",
+      mode: currentMode,
       idempotency_key: idempotencyKey,
       caption: $(isPhoto ? "photo-caption" : "caption").value,
       consent: true,
-      privacy: mode() === "direct" ? privacySelect().value : null,
+      privacy: currentMode === "direct" ? privacySelect().value : null,
       disable_comment: $(isPhoto ? "photo-disable-comment" : "disable-comment").checked,
       disable_duet: isPhoto ? false : $("disable-duet").checked,
       disable_stitch: isPhoto ? false : $("disable-stitch").checked,
       brand_organic_toggle: $(isPhoto ? "photo-own-brand" : "own-brand").checked,
       brand_content_toggle: $(isPhoto ? "photo-paid-brand" : "paid-brand").checked,
-      is_aigc: $(isPhoto ? "photo-ai-content" : "ai-content").checked
+      is_aigc: $(isPhoto ? "photo-ai-content" : "ai-content").checked,
+      thumbnail_timestamp: isPhoto ? null : Number($("thumbnail-timestamp")?.value) || null,
+      scheduled_at: scheduledAt
     };
 
     try {
@@ -683,7 +728,7 @@
     }
     sending = false;
     review();
-  });
+  }
 
   $("refresh-status").addEventListener("click", async () => {
     if (!jobId) return;

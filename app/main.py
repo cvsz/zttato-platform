@@ -119,7 +119,9 @@ class PublishInput(BaseModel):
     brand_content_toggle: bool = False
     brand_organic_toggle: bool = False
     is_aigc: bool = False
-    media_type: str = Field(default="video", pattern="^(video|photo)$")
+    thumbnail_timestamp: int | None = Field(default=None, ge=0)
+    scheduled_at: int | None = Field(default=None, ge=0)
+    media_type: str = Field(default="video", pattern="^(video|photo|photo_slideshow)$")
     photo_images: list[str] | None = None
     photo_cover_index: int | None = None
 
@@ -128,6 +130,12 @@ class PublishInput(BaseModel):
         limit = 4000 if self.media_type == "photo" else 2200
         if len(self.caption.encode("utf-16-le")) // 2 > limit:
             raise ValueError(f"Caption must not exceed {limit} UTF-16 code units")
+        return self
+
+    @model_validator(mode="after")
+    def scheduled_requires_direct_mode(self):
+        if self.scheduled_at is not None and self.mode != "direct":
+            raise ValueError("Scheduled posts require direct mode")
         return self
 
 
@@ -177,6 +185,20 @@ class PhotoMediaInput(BaseModel):
         return self
 
 
+class MediaPreflightInput(BaseModel):
+    media_type: str = Field(pattern="^(video|photo|photo_slideshow)$")
+    size_bytes: int | None = Field(default=None, ge=1)
+    duration_ms: int | None = Field(default=None, ge=1)
+    width: int | None = Field(default=None, ge=1)
+    height: int | None = Field(default=None, ge=1)
+    format: str | None = None
+    photo_count: int | None = Field(default=None, ge=1, le=35)
+    photo_sizes: list[int] | None = None
+    photo_formats: list[str] | None = None
+
+    model_config = {"extra": "forbid"}
+
+
 class InvoiceIntentInput(BaseModel):
     idempotency_key: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
     currency: str = Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")
@@ -210,6 +232,7 @@ def _publish_request_fingerprint(payload: PublishInput, settings: Settings) -> s
         "brand_content_toggle": payload.brand_content_toggle,
         "brand_organic_toggle": payload.brand_organic_toggle,
         "is_aigc": payload.is_aigc,
+        "thumbnail_timestamp": payload.thumbnail_timestamp,
         "media_type": payload.media_type,
     }
     serialized = json.dumps(effective_request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -579,8 +602,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return tokens["access_token"]
 
     def claim_publish_job(job_id: str | None = None) -> str | None:
+        now = int(time.time())
         with session_factory() as session:
-            statement = select(PublishJob).where(PublishJob.status == "QUEUED")
+            statement = select(PublishJob).where(
+                (PublishJob.status == "QUEUED")
+                | ((PublishJob.status == "SCHEDULED") & (PublishJob.scheduled_at <= now))
+            )
             if job_id:
                 statement = statement.where(PublishJob.id == job_id)
             job = session.scalar(
@@ -699,6 +726,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
             provider_init_started = True
             if is_photo:
+                photo_mode = "photo_slideshow" if payload.media_type == "photo_slideshow" else "photo"
                 publish_id, _ = await client.init_photo(
                     token,
                     mode=payload.mode,
@@ -710,6 +738,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     is_aigc=payload.is_aigc,
                     photo_images=photo_data["images"],
                     photo_cover_index=photo_data["cover_index"],
+                    photo_mode=photo_mode,
                 )
                 provider_publish_id = publish_id
                 save_publish_state(
@@ -731,6 +760,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     brand_content_toggle=payload.brand_content_toggle,
                     brand_organic_toggle=payload.brand_organic_toggle,
                     is_aigc=payload.is_aigc,
+                    thumbnail_timestamp=payload.thumbnail_timestamp,
                 )
                 provider_publish_id = publish_id
                 save_publish_state(
@@ -1148,6 +1178,159 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "max_video_post_duration_sec": info.get("max_video_post_duration_sec"),
         }
 
+    @app.post("/api/media/preflight")
+    async def media_preflight(
+        request: Request,
+        payload: MediaPreflightInput,
+        row: BrowserSession = Depends(current),
+    ):
+        require_csrf(request, row)
+        account(row, Depends(db))  # validate session exists
+        results = []
+
+        if payload.media_type == "video":
+            # Video preflight checks
+            if payload.size_bytes is None:
+                results.append({"check": "size", "status": "fail", "message": "Video size is required for preflight"})
+            else:
+                if payload.size_bytes < 1:
+                    results.append({"check": "size", "status": "fail", "message": "Video must be at least 1 byte"})
+                elif payload.size_bytes > 4_000_000_000:
+                    results.append({"check": "size", "status": "fail", "message": "Video exceeds TikTok 4 GB limit"})
+                elif payload.size_bytes > s.max_video_bytes:
+                    results.append(
+                        {
+                            "check": "size",
+                            "status": "warn",
+                            "message": f"Video exceeds server upload limit of {s.max_video_bytes // (1024 * 1024)} MiB; consider direct upload",
+                        }
+                    )
+                else:
+                    results.append({"check": "size", "status": "pass", "message": "Video size within limits"})
+
+            if payload.duration_ms is not None:
+                if payload.duration_ms <= 0:
+                    results.append(
+                        {"check": "duration", "status": "fail", "message": "Video duration must be positive"}
+                    )
+                elif payload.duration_ms > 600_000:  # 10 minutes
+                    results.append(
+                        {"check": "duration", "status": "fail", "message": "Video exceeds TikTok 10-minute limit"}
+                    )
+                else:
+                    results.append({"check": "duration", "status": "pass", "message": "Video duration within limits"})
+
+            if payload.width is not None and payload.height is not None:
+                if payload.width <= 0 or payload.height <= 0:
+                    results.append({"check": "dimensions", "status": "fail", "message": "Invalid video dimensions"})
+                else:
+                    aspect = payload.width / payload.height
+                    # TikTok recommends 9:16 (0.5625) for vertical video
+                    if 0.5 <= aspect <= 0.625:
+                        results.append(
+                            {
+                                "check": "aspect_ratio",
+                                "status": "pass",
+                                "message": "Aspect ratio optimal for TikTok (9:16)",
+                            }
+                        )
+                    elif 0.4 <= aspect <= 0.75:
+                        results.append(
+                            {
+                                "check": "aspect_ratio",
+                                "status": "warn",
+                                "message": "Aspect ratio acceptable but not optimal (recommended 9:16)",
+                            }
+                        )
+                    else:
+                        results.append(
+                            {
+                                "check": "aspect_ratio",
+                                "status": "warn",
+                                "message": "Aspect ratio may not display optimally on TikTok",
+                            }
+                        )
+
+            if payload.format:
+                if payload.format.lower() not in ("mp4", "mov"):
+                    results.append(
+                        {"check": "format", "status": "fail", "message": "TikTok requires MP4 or MOV format"}
+                    )
+                else:
+                    results.append({"check": "format", "status": "pass", "message": "Video format supported"})
+
+        elif payload.media_type in ("photo", "photo_slideshow"):
+            # Photo preflight checks
+            if payload.photo_count is None:
+                results.append(
+                    {"check": "photo_count", "status": "fail", "message": "Photo count is required for preflight"}
+                )
+            else:
+                max_photos = 35 if payload.media_type == "photo_slideshow" else 35
+                if payload.photo_count < 1:
+                    results.append({"check": "photo_count", "status": "fail", "message": "At least 1 photo required"})
+                elif payload.photo_count > max_photos:
+                    results.append(
+                        {
+                            "check": "photo_count",
+                            "status": "fail",
+                            "message": f"Maximum {max_photos} photos allowed for {payload.media_type}",
+                        }
+                    )
+                else:
+                    results.append(
+                        {
+                            "check": "photo_count",
+                            "status": "pass",
+                            "message": f"Photo count within limits ({payload.photo_count}/{max_photos})",
+                        }
+                    )
+
+            if payload.photo_sizes:
+                for i, size in enumerate(payload.photo_sizes):
+                    if size > 20_000_000:
+                        results.append(
+                            {
+                                "check": f"photo_size_{i}",
+                                "status": "fail",
+                                "message": f"Photo {i + 1} exceeds 20 MB limit",
+                            }
+                        )
+                    else:
+                        results.append(
+                            {
+                                "check": f"photo_size_{i}",
+                                "status": "pass",
+                                "message": f"Photo {i + 1} size within limits",
+                            }
+                        )
+
+            if payload.photo_formats:
+                for i, fmt in enumerate(payload.photo_formats):
+                    if fmt.lower() not in ("jpg", "jpeg", "webp"):
+                        results.append(
+                            {
+                                "check": f"photo_format_{i}",
+                                "status": "fail",
+                                "message": f"Photo {i + 1} must be JPEG or WebP",
+                            }
+                        )
+                    else:
+                        results.append(
+                            {
+                                "check": f"photo_format_{i}",
+                                "status": "pass",
+                                "message": f"Photo {i + 1} format supported",
+                            }
+                        )
+
+        # Overall status
+        has_fail = any(r["status"] == "fail" for r in results)
+        has_warn = any(r["status"] == "warn" for r in results)
+        overall = "fail" if has_fail else ("warn" if has_warn else "pass")
+
+        return {"overall": overall, "checks": results}
+
     @app.post("/api/media")
     async def add_media(
         request: Request,
@@ -1339,21 +1522,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "brand_content_toggle",
                 "brand_organic_toggle",
                 "is_aigc",
+                "thumbnail_timestamp",
+                "scheduled_at",
                 "media_type",
             }
         )
+        initial_status = "SCHEDULED" if payload.scheduled_at else "QUEUED"
         if retryable_failed_job:
-            retryable_failed_job.status = "QUEUED"
+            retryable_failed_job.status = initial_status
+            retryable_failed_job.scheduled_at = payload.scheduled_at
             retryable_failed_job.fail_reason = None
             retryable_failed_job.request_cipher = cipher.encrypt(json.dumps(encrypted_request, ensure_ascii=False))
             retryable_failed_job.consented_at = int(time.time())
             retryable_failed_job.consent_version = PUBLISH_CONSENT_VERSION
             retryable_failed_job.checked_at = 0
             session.commit()
-            background_tasks.add_task(run_queued_publish_job, retryable_failed_job.id)
+            if not payload.scheduled_at:
+                background_tasks.add_task(run_queued_publish_job, retryable_failed_job.id)
             return {
                 "job_id": retryable_failed_job.id,
-                "status": "QUEUED",
+                "status": initial_status,
                 "idempotent_replay": True,
                 "retry_queued": True,
             }
@@ -1364,11 +1552,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             idempotency_key=payload.idempotency_key,
             media_id=media.id,
             mode=payload.mode,
-            status="QUEUED",
+            status=initial_status,
             request_fingerprint=request_fingerprint,
             consented_at=int(time.time()),
             consent_version=PUBLISH_CONSENT_VERSION,
             request_cipher=cipher.encrypt(json.dumps(encrypted_request, ensure_ascii=False)),
+            scheduled_at=payload.scheduled_at,
         )
         session.add(job)
         try:
@@ -1393,11 +1582,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "idempotent_replay": True,
                 }
             raise
-        background_tasks.add_task(run_queued_publish_job, job.id)
+        if not payload.scheduled_at:
+            background_tasks.add_task(run_queued_publish_job, job.id)
         return {
             "job_id": job.id,
-            "status": "QUEUED",
-            "note": "Saved securely; TikTok processing will continue in the background.",
+            "status": initial_status,
+            "note": "Saved securely; TikTok processing will continue in the background."
+            if not payload.scheduled_at
+            else "Scheduled for future publishing.",
         }
 
     @app.get("/api/jobs/{job_id}")

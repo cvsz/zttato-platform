@@ -15,6 +15,7 @@ function dashboard({
   jobResponse = null,
 } = {}) {
   const ids = [...html.matchAll(/id="([^"]+)"/g)].map((match) => match[1]);
+  const checkedIds = new Set([...html.matchAll(/id="([^"]+)"[^>]*\bchecked\b/gi)].map((match) => match[1]));
   const elements = new Map();
   const listeners = new Map();
   for (const id of ids) {
@@ -23,7 +24,7 @@ function dashboard({
     elements.set(id, {
       id,
       value: "",
-      checked: false,
+      checked: checkedIds.has(id),
       disabled: false,
       textContent: "",
       files: [],

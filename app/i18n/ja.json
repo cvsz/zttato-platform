@@ -58,7 +58,9 @@
       "drop_title": "MP4 をここにドロップするか、クリックして選択してください",
       "drop_help": "MP4 のみ · 最大 64 MiB · 機密性の高いコンテンツはアップロードしないでください",
       "draft_help": "下書きをアップロードし、TikTok の受信箱で編集と投稿を完了してください。",
-      "direct_help": "確認後、TikTok が直接投稿を処理し、アカウントと API の制限を適用します。"
+      "direct_help": "確認後、TikTok が直接投稿を処理し、アカウントと API の制限を適用します。",
+      "thumbnail_timestamp_label": "Thumbnail timestamp (seconds)",
+      "thumbnail_timestamp_help": "Choose a custom thumbnail frame from the video"
     },
     "photo": {
       "title": "2b · 写真を準備 (フォト投稿)",
@@ -83,7 +85,12 @@
       "photo_disclosure": "コンテンツの開示",
       "photo_own_brand": "この写真投稿は自分のビジネスを宣伝するものです",
       "photo_paid_brand": "この写真投稿は有料パートナーシップです",
-      "photo_ai_content": "この写真セットには AI 生成コンテンツが含まれます"
+      "photo_ai_content": "この写真セットには AI 生成コンテンツが含まれます",
+      "photo_mode_label": "Photo post type",
+      "photo_mode_photo": "Standard Photo Post",
+      "photo_mode_slideshow": "Photo Slideshow (auto-play with music)",
+      "photo_mode_photo_help": "Standard photo carousel post",
+      "photo_mode_slideshow_help": "Auto-playing slideshow with TikTok music"
     },
     "review": {
       "title": "3 · 確認と同意",
@@ -100,7 +107,11 @@
       "status": "コンテンツは送信されていません。",
       "refresh": "TikTok ステータスを更新",
       "draft": "下書き",
-      "direct": "直接投稿"
+      "direct": "直接投稿",
+      "schedule_label": "Schedule for",
+      "schedule_button": "Schedule for later",
+      "summary_scheduled": "This post is scheduled for {time}. It will be sent automatically.",
+      "scheduled": "Scheduled"
     },
     "account": {
       "title": "アカウント管理",
@@ -304,5 +315,24 @@
     "photo_https_required": "写真URLはHTTPSを使用する必要があります",
     "idempotent_replay": "（同じリクエスト、重複なし）",
     "error_unknown": "リクエストに失敗しました（{status}）"
+  },
+  "preflight": {
+    "title": "Media Preflight Check",
+    "run_button": "Run Preflight Check",
+    "checking": "Checking media against TikTok requirements…",
+    "overall_pass": "All checks passed",
+    "overall_warn": "Some warnings — review before publishing",
+    "overall_fail": "Blocking issues found — fix before publishing",
+    "check_size": "File size",
+    "check_duration": "Video duration",
+    "check_dimensions": "Dimensions",
+    "check_aspect_ratio": "Aspect ratio",
+    "check_format": "Format",
+    "check_photo_count": "Photo count",
+    "check_photo_size": "Photo size",
+    "check_photo_format": "Photo format",
+    "status_pass": "Pass",
+    "status_warn": "Warning",
+    "status_fail": "Fail"
   }
 }

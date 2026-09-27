@@ -58,7 +58,9 @@
       "drop_title": "将 MP4 拖放到此处或点击选择文件",
       "drop_help": "仅支持 MP4 · 最大 64 MiB · 请勿上传敏感内容",
       "draft_help": "上传草稿后，请在 TikTok 收件箱中完成编辑和发布。",
-      "direct_help": "确认后，TikTok 会处理直接发布并应用账号和 API 限制。"
+      "direct_help": "确认后，TikTok 会处理直接发布并应用账号和 API 限制。",
+      "thumbnail_timestamp_label": "Thumbnail timestamp (seconds)",
+      "thumbnail_timestamp_help": "Choose a custom thumbnail frame from the video"
     },
     "photo": {
       "title": "2b · 准备照片 (图片发布)",
@@ -83,7 +85,12 @@
       "photo_disclosure": "内容披露",
       "photo_own_brand": "此图片帖子推广我的业务",
       "photo_paid_brand": "此图片帖子为付费合作",
-      "photo_ai_content": "此照片组包含 AI 生成内容"
+      "photo_ai_content": "此照片组包含 AI 生成内容",
+      "photo_mode_label": "Photo post type",
+      "photo_mode_photo": "Standard Photo Post",
+      "photo_mode_slideshow": "Photo Slideshow (auto-play with music)",
+      "photo_mode_photo_help": "Standard photo carousel post",
+      "photo_mode_slideshow_help": "Auto-playing slideshow with TikTok music"
     },
     "review": {
       "title": "3 · 审核并确认",
@@ -100,7 +107,11 @@
       "status": "未发送内容。",
       "refresh": "刷新 TikTok 状态",
       "draft": "草稿",
-      "direct": "直接发布"
+      "direct": "直接发布",
+      "schedule_label": "Schedule for",
+      "schedule_button": "Schedule for later",
+      "summary_scheduled": "This post is scheduled for {time}. It will be sent automatically.",
+      "scheduled": "Scheduled"
     },
     "account": {
       "title": "账户控制",
@@ -304,5 +315,24 @@
     "photo_https_required": "照片 URL 必须使用 HTTPS",
     "idempotent_replay": "（相同请求，未重复）",
     "error_unknown": "请求失败（{status}）"
+  },
+  "preflight": {
+    "title": "Media Preflight Check",
+    "run_button": "Run Preflight Check",
+    "checking": "Checking media against TikTok requirements…",
+    "overall_pass": "All checks passed",
+    "overall_warn": "Some warnings — review before publishing",
+    "overall_fail": "Blocking issues found — fix before publishing",
+    "check_size": "File size",
+    "check_duration": "Video duration",
+    "check_dimensions": "Dimensions",
+    "check_aspect_ratio": "Aspect ratio",
+    "check_format": "Format",
+    "check_photo_count": "Photo count",
+    "check_photo_size": "Photo size",
+    "check_photo_format": "Photo format",
+    "status_pass": "Pass",
+    "status_warn": "Warning",
+    "status_fail": "Fail"
   }
 }

@@ -58,7 +58,9 @@
       "drop_title": "Thả tệp MP4 vào đây hoặc nhấp để chọn",
       "drop_help": "Chỉ hỗ trợ MP4 · tối đa 64 MiB · không tải lên nội dung nhạy cảm",
       "draft_help": "Tải bản nháp lên rồi hoàn tất chỉnh sửa và đăng trong hộp thư TikTok.",
-      "direct_help": "Sau khi bạn xác nhận, TikTok xử lý bài đăng trực tiếp và áp dụng giới hạn tài khoản/API."
+      "direct_help": "Sau khi bạn xác nhận, TikTok xử lý bài đăng trực tiếp và áp dụng giới hạn tài khoản/API.",
+      "thumbnail_timestamp_label": "Thumbnail timestamp (seconds)",
+      "thumbnail_timestamp_help": "Choose a custom thumbnail frame from the video"
     },
     "photo": {
       "title": "2b · Chuẩn bị ảnh (Đăng ảnh)",
@@ -83,7 +85,12 @@
       "photo_disclosure": "Công bố nội dung",
       "photo_own_brand": "Bài đăng ảnh này quảng bá doanh nghiệp của tôi",
       "photo_paid_brand": "Bài đăng ảnh này là nội dung hợp tác có trả phí",
-      "photo_ai_content": "Bộ ảnh này chứa nội dung do AI tạo"
+      "photo_ai_content": "Bộ ảnh này chứa nội dung do AI tạo",
+      "photo_mode_label": "Photo post type",
+      "photo_mode_photo": "Standard Photo Post",
+      "photo_mode_slideshow": "Photo Slideshow (auto-play with music)",
+      "photo_mode_photo_help": "Standard photo carousel post",
+      "photo_mode_slideshow_help": "Auto-playing slideshow with TikTok music"
     },
     "review": {
       "title": "3 · Xem xét và xác nhận",
@@ -100,7 +107,11 @@
       "status": "Chưa gửi nội dung.",
       "refresh": "Làm mới trạng thái TikTok",
       "draft": "Bản nháp",
-      "direct": "Đăng trực tiếp"
+      "direct": "Đăng trực tiếp",
+      "schedule_label": "Schedule for",
+      "schedule_button": "Schedule for later",
+      "summary_scheduled": "This post is scheduled for {time}. It will be sent automatically.",
+      "scheduled": "Scheduled"
     },
     "account": {
       "title": "Kiểm soát tài khoản",
@@ -304,5 +315,24 @@
     "photo_https_required": "URL ảnh phải sử dụng HTTPS",
     "idempotent_replay": " (yêu cầu giống, không trùng lặp)",
     "error_unknown": "Yêu cầu thất bại ({status})"
+  },
+  "preflight": {
+    "title": "Media Preflight Check",
+    "run_button": "Run Preflight Check",
+    "checking": "Checking media against TikTok requirements…",
+    "overall_pass": "All checks passed",
+    "overall_warn": "Some warnings — review before publishing",
+    "overall_fail": "Blocking issues found — fix before publishing",
+    "check_size": "File size",
+    "check_duration": "Video duration",
+    "check_dimensions": "Dimensions",
+    "check_aspect_ratio": "Aspect ratio",
+    "check_format": "Format",
+    "check_photo_count": "Photo count",
+    "check_photo_size": "Photo size",
+    "check_photo_format": "Photo format",
+    "status_pass": "Pass",
+    "status_warn": "Warning",
+    "status_fail": "Fail"
   }
 }
