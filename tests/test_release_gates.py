@@ -412,7 +412,7 @@ def test_uncertain_publish_initialization_persists_job_and_replay_does_not_dupli
     payload = {
         "media_id": "publish-media-fixture",
         "mode": "direct",
-        "idempotency_key": "uncertain-init-key-0001",
+        "idempotency_key": "test-test-test-test",
         "caption": "synthetic uncertain initiation",
         "privacy": "SELF_ONLY",
         "consent": True,

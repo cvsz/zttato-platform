@@ -48,3 +48,28 @@ image เดิมไม่รองรับ schema head ใหม่และ�
 ไฟล์ `.env.sandbox` และ `.env.production` ได้รับค่า quota, retention, cleanup interval และ metrics bearer token สำหรับ configuration ในแต่ละ profile โดยคง credentials/scopes เดิมไว้; permissions ถูกจำกัดเป็น owner-only (`0600`). Compose ปัจจุบันอ่าน `.env` แยกต่างหาก ดังนั้นการแก้ profile files นี้ไม่ได้เปลี่ยนหรือ restart runtime ที่กำลังทำงาน
 
 เวลา `2026-09-27T05:53:46Z` หมุนเฉพาะ `METRICS_BEARER_TOKEN` ใน `.env.sandbox`; ค่าเก่าและค่าใหม่ไม่ถูกบันทึกในหลักฐานนี้ ส่วน encryption key, PostgreSQL/TikTok credentials และ `.env.production` ไม่เปลี่ยน การหมุนนี้ไม่เปลี่ยน runtime เพราะ Compose ไม่ได้อ่าน `.env.sandbox` โดยตรง
+
+## Addendum — implementation verification 2026-09-27 13:21 UTC
+
+ผลส่วนนี้ตรวจจาก dirty local worktree ที่ `HEAD=268d9a77e4f74f86194732024f0e8d740b87e8df`; commit SHA เป็นฐานก่อนการแก้ไขชุดนี้ และไม่ได้แทน source revision ที่ deploy แล้ว
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Python/frontend checks | PASS — local | `make lint`; `make test`: Python 92 passed, Node 10 passed. มี Starlette/httpx deprecation warning หนึ่งรายการ |
+| Dependency audit | PASS — local | `make security`: `pip-audit --strict --requirement requirements-dev.txt`; no known vulnerabilities |
+| Container build | PASS — isolated candidate | `zttato-sandbox-app` และ `zttato-sandbox-migrate` สร้างจาก worktree โดยไม่เปลี่ยน image/container ที่ให้บริการพอร์ต 8000 |
+| Isolated Compose sandbox | PASS — local only | project `zttato-sandbox`; PostgreSQL 17.11, DB/media volume แยก, app `127.0.0.1:8001`, DB `127.0.0.1:55432`; Tiktok และ zWallet credentials ว่าง; callback canary ได้ HTTP 401 และไม่ปรากฏใน container logs |
+| Latest migration | PASS — isolated PG17 | schema `20260927_04`, `/health/ready` HTTP 200; production Compose DB ไม่ถูกแก้ |
+| Latest backup/restore | PASS — isolated PG17 | [restore drill](2026-09-27-pg17-restore-drill.md): เสร็จ `13:21:22Z`, synthetic RPO 0 วินาที, measured RTO 4 วินาที; session/OAuth/account/media/job อย่างละหนึ่งแถว, decrypt token สำเร็จด้วย key ที่ escrow แยก, HMAC/consent/encrypted request restored |
+| Durable publish queue | PASS — synthetic tests | queued job survive application startup/recovery, row claim, same-key replay, failure reconciliation; ไม่เรียก TikTok จริง |
+| Metrics/alerts | PASS — local synthetic | Prometheus พบ 9 rules และ `promtool test rules` ผ่าน; queue depth/age metric มี unit coverage |
+
+การตรวจ runtime แบบ read-only หลัง rehearsal พบ Compose app ที่กำลังทำงานยังใช้ image `sha256:499938cc484581d4a351bf3f6ad0935d1f9c6874096f43ecdf0b475c54e4a6e5` และ DB revision `20260924_01`; ไม่มีการ deploy, migrate, restart หรือเปลี่ยนไฟล์ production env ในงานนี้. Sandbox image/schema `20260927_04` ไม่ถูกนำไปแทน runtime. Restore/rollback drill เดิมในตารางด้านบนครอบคลุม schema `20260927_02`; restore ของ head `20260927_04` ผ่านแล้ว แต่ rollback ด้วย known-good image สำหรับ head 04 ยังไม่ได้ทำซ้ำ.
+
+## Remaining release blockers
+
+- `BLOCKED_EXTERNAL`: TikTok authorized Sandbox E2E, live creator-info permissions, actual upstream rate-limit/timeout-after-success reconciliation, and TikTok app audit/production approval.
+- `NOT_TESTED`: public edge OAuth query redaction, Alertmanager receiver/paging, production encryption-key escrow/rotation, legal counsel review, and public workload/load soak.
+- `NOT_TESTED`: live GitHub CI/security checks for this dirty worktree. Code-scanning alert #4 cannot close until the fix is committed/pushed and a new hosted scan runs.
+- `NOT_TESTED`: canonical Affiliate Core and Commerce Sources bounded contexts are not implemented in this Creator-focused application; do not claim the larger platform architecture is complete.
+- User boundary held: no ad-budget, payment, zWallet, TikTok publish, credential rotation, production migration, commit/push, or production deployment occurred.

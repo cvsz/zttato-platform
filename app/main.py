@@ -647,8 +647,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     resolved_media = Path(media_path).resolve()
                     if not resolved_media.is_relative_to(root) or not resolved_media.is_file():
                         raise HTTPException(404, "Uploaded video is no longer available")
-                    if media_duration_ms is None:
-                        media_duration_ms = mp4_duration_ms(media_path)
+                    media_duration_ms = mp4_duration_ms(media_path)
                     if media_duration_ms <= 0 or media_duration_ms > MAX_TIKTOK_API_VIDEO_DURATION_SEC * 1000:
                         raise HTTPException(422, "Video duration is outside Content Posting API limits")
 
