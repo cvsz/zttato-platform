@@ -71,42 +71,51 @@
     if (!card) return;
 
     if (!mediaId) {
-      card.innerHTML = `<p class="note">Upload an MP4 first.</p>`;
+      card.textContent = "Upload an MP4 first.";
       return;
     }
 
     const parts = [];
-    parts.push(`<li><strong>Video</strong> ready in workspace</li>`);
-    parts.push(
-      `<li><strong>Mode</strong> · ${
-        mode() === "draft"
-          ? "Draft (finish inside TikTok)"
-          : "Direct Post"
-      }</li>`
-    );
+    parts.push("Video ready in workspace");
+    parts.push(`Mode · ${mode() === "draft" ? "Draft (finish inside TikTok)" : "Direct Post"}`);
 
     if (mode() === "direct") {
       const privacy = $("privacy")?.value;
-      parts.push(
-        `<li><strong>Visibility</strong> · ${
-          labels[privacy] || privacy || "—"
-        }</li>`
-      );
+      parts.push(`Visibility · ${labels[privacy] || privacy || "—"}`);
 
       const disclosures = [];
       if ($("own-brand")?.checked) disclosures.push("Own business");
       if ($("paid-brand")?.checked) disclosures.push("Paid partnership");
       if ($("ai-content")?.checked) disclosures.push("AI-generated");
       if (disclosures.length) {
-        parts.push(`<li><strong>Disclosures</strong> · ${disclosures.join(", ")}</li>`);
+        parts.push(`Disclosures · ${disclosures.join(", ")}`);
       }
     }
 
-    card.innerHTML = `
-      <p class="note" style="margin:0 0 8px">Ready to send after consent:</p>
-      <ul>${parts.join("")}</ul>
-      <p class="note" style="margin:10px 0 0">No transfer occurs until you confirm.</p>
-    `;
+    const intro = document.createElement("p");
+    intro.className = "note";
+    intro.textContent = "Ready to send after consent:";
+
+    const list = document.createElement("ul");
+    if (typeof list.append === "function") {
+      for (const part of parts) {
+        const item = document.createElement("li");
+        item.textContent = part;
+        list.append(item);
+      }
+    } else {
+      list.textContent = parts.join("\n");
+    }
+
+    const footer = document.createElement("p");
+    footer.className = "note";
+    footer.textContent = "No transfer occurs until you confirm.";
+
+    if (typeof card.replaceChildren === "function") {
+      card.replaceChildren(intro, list, footer);
+    } else {
+      card.textContent = [intro.textContent, list.textContent, footer.textContent].join("\n");
+    }
   }
 
   function review() {
@@ -262,31 +271,33 @@
 
   async function boot() {
     try {
-      // Initialize i18n (non-blocking, with fallback)
-      try {
-        await i18n.init();
-      } catch (i18nErr) {
-        console.warn('i18n init failed, continuing without translations:', i18nErr);
-      }
-      // Apply translations to static elements
-      document.querySelectorAll('[data-i18n]').forEach(el => {
-        const key = el.getAttribute('data-i18n');
-        if (key) el.textContent = i18n.t(key);
-      });
-      // Apply placeholder translations
-      document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
-        const key = el.getAttribute('data-i18n-placeholder');
-        if (key) el.placeholder = i18n.t(key);
-      });
-
-      // Language selector
-      const langSelect = $('lang-select');
-      if (langSelect) {
-        langSelect.value = i18n.getLocale();
-        langSelect.addEventListener('change', async (e) => {
-          await i18n.setLocale(e.target.value);
-          location.reload();
-        });
+      // Initialize optional i18n (non-blocking, with fallback).
+      if (typeof i18n !== "undefined" && i18n) {
+        try {
+          if (typeof i18n.init === "function") await i18n.init();
+        } catch (i18nErr) {
+          console.warn("i18n init failed, continuing without translations:", i18nErr);
+        }
+        if (typeof document.querySelectorAll === "function") {
+          document.querySelectorAll('[data-i18n]').forEach(el => {
+            const key = el.getAttribute('data-i18n');
+            if (key && typeof i18n.t === "function") el.textContent = i18n.t(key);
+          });
+          document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+            const key = el.getAttribute('data-i18n-placeholder');
+            if (key && typeof i18n.t === "function") el.placeholder = i18n.t(key);
+          });
+        }
+        const langSelect = $('lang-select');
+        if (langSelect && typeof i18n.getLocale === "function") {
+          langSelect.value = i18n.getLocale();
+          if (typeof i18n.setLocale === "function") {
+            langSelect.addEventListener('change', async (e) => {
+              await i18n.setLocale(e.target.value);
+              location.reload();
+            });
+          }
+        }
       }
 
       const data = await api("/api/session");

@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.config import Settings, load_settings, validate_host_config
+from app.config import Settings, load_settings, validate_host_config, validate_zwallet_config
 from app.db import (
     BrowserSession,
     LinkedAccount,
@@ -30,6 +30,13 @@ from app.db import (
 )
 from app.security import TokenCipher, browser_session, digest, new_browser_session, require_csrf
 from app.tiktok import TikTokClient
+from app.zwallet import (
+    ZWalletBillingClient,
+    ZWalletInvalidResponse,
+    ZWalletNotConfigured,
+    ZWalletTimedOut,
+    ZWalletUnavailable,
+)
 from app.i18n.routes import router as i18n_router
 
 WEB = Path(__file__).resolve().parent.parent / "web"
@@ -84,9 +91,18 @@ class PublishInput(BaseModel):
     photo_cover_index: int | None = None
 
 
+class InvoiceIntentInput(BaseModel):
+    idempotency_key: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
+    currency: str = Field(min_length=3, max_length=3, pattern=r"^[A-Z]{3}$")
+    amount_minor: int = Field(gt=0, le=9_007_199_254_740_991, strict=True)
+
+    model_config = {"extra": "forbid"}
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     s = settings or load_settings()
     validate_host_config(s)
+    validate_zwallet_config(s)
     app = FastAPI(title="zTTato Creator", docs_url=None, redoc_url=None, openapi_url=None)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(s.allowed_hosts))
     app.include_router(i18n_router)
@@ -97,6 +113,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine, session_factory = make_session_factory(s.database_url, bootstrap=s.env != "production")
     cipher = TokenCipher(s.encryption_key)
     app.state.tiktok = TikTokClient(s)
+    app.state.zwallet = ZWalletBillingClient(s.zwallet_adapter_url, s.z_platform_service_token)
     app.state.settings = s
 
     def db():
@@ -295,6 +312,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if new_cookie_values:
             issue_cookies(response, *new_cookie_values)
         return response
+
+    @app.post("/api/billing/invoice-intents")
+    async def create_invoice_intent(
+        request: Request,
+        payload: InvoiceIntentInput,
+        row: BrowserSession = Depends(current),
+    ):
+        require_csrf(request, row)
+        try:
+            return await request.app.state.zwallet.create_invoice_intent(
+                tenant_id=row.id,
+                idempotency_key=payload.idempotency_key,
+                currency=payload.currency,
+                amount_minor=payload.amount_minor,
+            )
+        except ZWalletNotConfigured as exc:
+            raise HTTPException(503, "Billing is not configured") from exc
+        except ZWalletTimedOut as exc:
+            raise HTTPException(504, "Billing service timed out") from exc
+        except ZWalletUnavailable as exc:
+            raise HTTPException(503, "Billing service is unavailable") from exc
+        except ZWalletInvalidResponse as exc:
+            raise HTTPException(502, "Billing service returned an invalid response") from exc
 
     @app.get("/auth/tiktok/start")
     def start(request: Request, session: Session = Depends(db)):

@@ -1,3 +1,4 @@
+import json
 import re
 import time
 from dataclasses import replace
@@ -259,3 +260,200 @@ def test_dashboard_markup_and_scripts_have_matching_ids_and_decoded_separators()
     assert "&middot;" in html
     assert r"\u00b7" not in html
     assert r"\u00b7" not in javascript
+
+
+def billing_client(tmp_path, handler):
+    conf = replace(
+        settings(tmp_path),
+        zwallet_adapter_url="https://zwallet.example.test",
+        z_platform_service_token="service-token-test-value",
+    )
+    app = create_app(conf)
+    client = TestClient(app)
+    client.get("/api/session")
+    app.state.zwallet.transport = httpx.MockTransport(handler)
+    return app, client
+
+
+def post_invoice_intent(client, *, csrf=True, payload=None):
+    headers = {"x-csrf-token": client.cookies["zttato_csrf"]} if csrf else {}
+    return client.post(
+        "/api/billing/invoice-intents",
+        json=payload
+        or {
+            "idempotency_key": "intent-key-00000001",
+            "currency": "USD",
+            "amount_minor": 500,
+        },
+        headers=headers,
+    )
+
+
+def test_zwallet_invoice_intent_is_session_scoped_and_server_authenticated(tmp_path):
+    observed = []
+
+    async def adapter(request):
+        body = json.loads(request.content)
+        observed.append(
+            (request.url.path, request.headers.get("authorization"), request.headers.get("idempotency-key"), body)
+        )
+        return httpx.Response(
+            201,
+            json={
+                "intent_id": "intent-123",
+                "idempotency_key": body["idempotency_key"],
+                "tenant_id": body["tenant_id"],
+                "currency": body["currency"],
+                "amount_minor": body["amount_minor"],
+                "status": "requires_payment_processor",
+                "created_at": "2026-09-27T12:00:00Z",
+            },
+        )
+
+    app, client = billing_client(tmp_path, adapter)
+    response = post_invoice_intent(client)
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "intent_id": "intent-123",
+        "currency": "USD",
+        "amount_minor": 500,
+        "status": "requires_payment_processor",
+        "created_at": "2026-09-27T12:00:00Z",
+    }
+    assert response.headers["cache-control"] == "no-store"
+    assert len(observed) == 1
+    path, authorization, idempotency_key, body = observed[0]
+    assert path == "/api/invoice-intents"
+    assert authorization == "Bearer service-token-test-value"
+    assert idempotency_key == "intent-key-00000001"
+    assert body == {
+        "tenant_id": digest(client.cookies["zttato_session"]),
+        "idempotency_key": "intent-key-00000001",
+        "currency": "USD",
+        "amount_minor": 500,
+    }
+    assert "tenant_id" not in response.json()
+    assert "service-token-test-value" not in response.text
+    assert client.get("/api/session").json()["connected"] is False
+
+
+def test_zwallet_invoice_intent_requires_csrf_and_rejects_client_tenant_id(tmp_path):
+    async def unexpected_adapter_call(request):
+        raise AssertionError("invalid requests must not reach the adapter")
+
+    _, client = billing_client(tmp_path, unexpected_adapter_call)
+    assert post_invoice_intent(client, csrf=False).status_code == 403
+    response = post_invoice_intent(
+        client,
+        payload={
+            "tenant_id": "attacker-tenant",
+            "idempotency_key": "intent-key-00000001",
+            "currency": "USD",
+            "amount_minor": 500,
+        },
+    )
+    assert response.status_code == 422
+
+
+def test_zwallet_invoice_intent_retries_transient_failure_with_same_key(tmp_path):
+    calls = []
+
+    async def adapter(request):
+        calls.append(request.headers["idempotency-key"])
+        if len(calls) == 1:
+            return httpx.Response(503, json={"error": "temporary"})
+        body = json.loads(request.content)
+        return httpx.Response(
+            201,
+            json={
+                "intent_id": "intent-replayed",
+                "idempotency_key": body["idempotency_key"],
+                "tenant_id": body["tenant_id"],
+                "currency": body["currency"],
+                "amount_minor": body["amount_minor"],
+                "status": "requires_payment_processor",
+                "created_at": "2026-09-27T12:00:00Z",
+            },
+        )
+
+    _, client = billing_client(tmp_path, adapter)
+    response = post_invoice_intent(client)
+    assert response.status_code == 200
+    assert response.json()["intent_id"] == "intent-replayed"
+    assert calls == ["intent-key-00000001", "intent-key-00000001"]
+
+
+def test_zwallet_invoice_intent_caps_transient_retries(tmp_path):
+    calls = []
+
+    async def unavailable_adapter(request):
+        calls.append(request.headers["idempotency-key"])
+        return httpx.Response(503, json={"error": "temporary"})
+
+    _, client = billing_client(tmp_path, unavailable_adapter)
+    response = post_invoice_intent(client)
+    assert response.status_code == 503
+    assert len(calls) == 3
+    assert "temporary" not in response.text
+
+
+def test_zwallet_invoice_intent_rejects_oversized_adapter_response(tmp_path):
+    async def oversized_adapter(request):
+        return httpx.Response(
+            201,
+            content=b"x" * (64 * 1024 + 1),
+            headers={"content-type": "application/json"},
+        )
+
+    _, client = billing_client(tmp_path, oversized_adapter)
+    response = post_invoice_intent(client)
+    assert response.status_code == 502
+    assert "service-token-test-value" not in response.text
+
+
+def test_zwallet_invoice_intent_fails_closed_when_unconfigured_or_response_mismatches(tmp_path):
+    client = TestClient(create_app(settings(tmp_path)))
+    client.get("/api/session")
+    assert post_invoice_intent(client).status_code == 503
+
+    async def mismatched_adapter(request):
+        body = json.loads(request.content)
+        return httpx.Response(
+            201,
+            json={
+                "intent_id": "intent-123",
+                "idempotency_key": body["idempotency_key"],
+                "tenant_id": "different-tenant",
+                "currency": body["currency"],
+                "amount_minor": body["amount_minor"],
+                "status": "requires_payment_processor",
+                "created_at": "2026-09-27T12:00:00Z",
+            },
+        )
+
+    app, client = billing_client(tmp_path / "mismatch", mismatched_adapter)
+    response = post_invoice_intent(client)
+    assert response.status_code == 502
+    assert "different-tenant" not in response.text
+    assert "service-token-test-value" not in response.text
+
+
+def test_production_zwallet_adapter_requires_https_off_loopback(tmp_path):
+    bad = replace(
+        settings(tmp_path),
+        env="production",
+        base_url="https://testserver",
+        database_url="postgresql+psycopg://user:password@db:5432/zttato",
+        encryption_key="test-encryption-key",
+        client_key="client-key",
+        client_secret="client-secret",
+        zwallet_adapter_url="http://zwallet.internal:3040",
+        z_platform_service_token="service-token-test-value",
+    )
+    try:
+        create_app(bad)
+    except ValueError as exc:
+        assert "must use HTTPS" in str(exc)
+    else:
+        raise AssertionError("production adapter traffic must use HTTPS off loopback")
