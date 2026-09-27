@@ -4,6 +4,7 @@ import asyncio
 import html
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
 import os
@@ -17,18 +18,23 @@ from pathlib import Path
 from time import perf_counter
 from urllib.parse import urlencode, urlparse
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select, text
+from pydantic import BaseModel, Field, StrictInt, StrictStr, ValidationError, field_validator, model_validator
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.config import Settings, load_settings, validate_host_config, validate_zwallet_config
+from app.config import (
+    Settings,
+    load_settings,
+    media_url_matches_verified_prefix,
+    validate_deployment_config,
+)
 from app.db import (
     BrowserSession,
     LinkedAccount,
@@ -40,7 +46,7 @@ from app.db import (
     make_session_factory,
 )
 from app.media import InvalidMP4, mp4_duration_ms
-from app.maintenance import remove_local_upload, run_cleanup
+from app.maintenance import recover_stale_publish_jobs, remove_local_upload, run_cleanup
 from app.security import TokenCipher, browser_session, digest, new_browser_session, require_csrf
 from app.tiktok import TikTokClient
 from app.zwallet import (
@@ -66,6 +72,9 @@ _CLEANUP_LAST_SUCCESS = 0
 _VIDEO_UPLOADS = 0
 _VIDEO_UPLOAD_BYTES = 0
 _METRICS_LOCK = threading.Lock()
+MAX_TIKTOK_API_VIDEO_DURATION_SEC = 600
+PHOTO_MEDIA_PREFIX = "fernet:v1:"
+PUBLISH_CONSENT_VERSION = "publish-consent-v1"
 
 
 AVATAR_CDN_SUFFIXES = (
@@ -101,7 +110,7 @@ class PublishInput(BaseModel):
     media_id: str
     mode: str
     idempotency_key: str = Field(min_length=16, max_length=128)
-    caption: str = Field(default="", max_length=2200)
+    caption: str = Field(default="", max_length=4000)
     privacy: str | None = None
     consent: bool
     disable_comment: bool = False
@@ -110,16 +119,62 @@ class PublishInput(BaseModel):
     brand_content_toggle: bool = False
     brand_organic_toggle: bool = False
     is_aigc: bool = False
-    media_type: str = "video"
+    media_type: str = Field(default="video", pattern="^(video|photo)$")
     photo_images: list[str] | None = None
     photo_cover_index: int | None = None
 
-    @field_validator("caption")
+    @model_validator(mode="after")
+    def caption_fits_tiktok_utf16_limit(self):
+        limit = 4000 if self.media_type == "photo" else 2200
+        if len(self.caption.encode("utf-16-le")) // 2 > limit:
+            raise ValueError(f"Caption must not exceed {limit} UTF-16 code units")
+        return self
+
+
+class PhotoMediaInput(BaseModel):
+    photo_images: list[StrictStr] = Field(min_length=1, max_length=35)
+    photo_cover_index: StrictInt = 0
+
+    model_config = {"extra": "forbid"}
+
+    @field_validator("photo_images")
     @classmethod
-    def caption_fits_tiktok_utf16_limit(cls, value: str) -> str:
-        if len(value.encode("utf-16-le")) // 2 > 2200:
-            raise ValueError("Caption must not exceed 2200 UTF-16 code units")
-        return value
+    def validate_photo_urls(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not value or len(value) > 2048 or value != value.strip() or any(char.isspace() for char in value):
+                raise ValueError("Photo URL is empty, too long, or contains unescaped whitespace")
+            try:
+                parsed = urlparse(value)
+                host = (parsed.hostname or "").lower().rstrip(".")
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("Photo URL is invalid") from exc
+            try:
+                ipaddress.ip_address(host)
+                is_ip_address = True
+            except ValueError:
+                is_ip_address = False
+            if (
+                parsed.scheme != "https"
+                or not host
+                or "." not in host
+                or is_ip_address
+                or parsed.username
+                or parsed.password
+                or parsed.fragment
+                or port not in (None, 443)
+            ):
+                raise ValueError("Photo URLs must use HTTPS on a public domain without credentials or fragments")
+            suffix = Path(parsed.path).suffix.lower()
+            if suffix and suffix not in {".jpg", ".jpeg", ".webp"}:
+                raise ValueError("TikTok Photo Post supports JPEG and WebP image URLs only")
+        return values
+
+    @model_validator(mode="after")
+    def cover_index_must_select_photo(self):
+        if self.photo_cover_index < 0 or self.photo_cover_index >= len(self.photo_images):
+            raise ValueError("photo_cover_index must select an image in photo_images")
+        return self
 
 
 class InvoiceIntentInput(BaseModel):
@@ -139,6 +194,28 @@ def _quota_subject(request: Request, settings: Settings) -> str:
     key_material = settings.encryption_key or settings.client_secret or "zttato-development-quota-key"
     key = hashlib.sha256(key_material.encode("utf-8") + b"|request-quota-subject").digest()
     return hmac.new(key, identity.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _publish_request_fingerprint(payload: PublishInput, settings: Settings) -> str:
+    """HMAC the effective publish choices without storing caption or media URLs."""
+    effective_request = {
+        "media_id": payload.media_id,
+        "mode": payload.mode,
+        "caption": payload.caption,
+        "privacy": payload.privacy,
+        "consent": payload.consent,
+        "disable_comment": payload.disable_comment,
+        "disable_duet": payload.disable_duet,
+        "disable_stitch": payload.disable_stitch,
+        "brand_content_toggle": payload.brand_content_toggle,
+        "brand_organic_toggle": payload.brand_organic_toggle,
+        "is_aigc": payload.is_aigc,
+        "media_type": payload.media_type,
+    }
+    serialized = json.dumps(effective_request, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    secret = settings.encryption_key or settings.client_secret or "development-only-publish-fingerprint-key"
+    key = hmac.new(secret.encode("utf-8"), b"zttato/publish-fingerprint/v1", hashlib.sha256).digest()
+    return hmac.new(key, serialized.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
 def _increment_quota(
@@ -223,7 +300,12 @@ def _record_cleanup_result(result: dict[str, int | bool] | None) -> None:
             _CLEANUP_FILE_DELETE_FAILURES += int(result.get("file_delete_failures", 0))
 
 
-def _prometheus_metrics(media_dir: str | None = None) -> str:
+def _prometheus_metrics(
+    media_dir: str | None = None,
+    *,
+    publish_queue_depth: int = 0,
+    publish_queue_oldest_age_seconds: int = 0,
+) -> str:
     with _METRICS_LOCK:
         counts = dict(_REQUEST_COUNT)
         durations = dict(_REQUEST_DURATION)
@@ -244,6 +326,16 @@ def _prometheus_metrics(media_dir: str | None = None) -> str:
     )
     for (method, status), duration in sorted(durations.items()):
         lines.append(f'zttato_http_request_duration_seconds_sum{{method="{method}",status="{status}"}} {duration:.6f}')
+    lines.extend(
+        [
+            "# HELP zttato_publish_queue_depth Number of consented publish jobs waiting for a worker.",
+            "# TYPE zttato_publish_queue_depth gauge",
+            f"zttato_publish_queue_depth {publish_queue_depth}",
+            "# HELP zttato_publish_queue_oldest_age_seconds Age of the oldest queued publish job.",
+            "# TYPE zttato_publish_queue_oldest_age_seconds gauge",
+            f"zttato_publish_queue_oldest_age_seconds {publish_queue_oldest_age_seconds}",
+        ]
+    )
     lines.extend(
         [
             "# HELP zttato_oauth_failures_total OAuth route failures by HTTP status.",
@@ -316,12 +408,11 @@ def _prometheus_metrics(media_dir: str | None = None) -> str:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     s = settings or load_settings()
-    validate_host_config(s)
-    validate_zwallet_config(s)
+    validate_deployment_config(s)
     Path(s.media_dir).mkdir(parents=True, exist_ok=True)
     if s.database_url.startswith("sqlite:///"):
         Path(s.database_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
-    engine, session_factory = make_session_factory(s.database_url, bootstrap=s.env != "production")
+    engine, session_factory = make_session_factory(s.database_url, bootstrap=s.env not in {"staging", "production"})
 
     @asynccontextmanager
     async def lifespan(_app):
@@ -330,7 +421,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         async def cleanup_loop():
             while not stop.is_set():
                 try:
-                    if s.env == "production":
+                    if s.env in {"staging", "production"}:
                         with session_factory() as check_session:
                             revision = check_session.scalar(text("SELECT version_num FROM alembic_version"))
                         if revision != MIGRATION_HEAD:
@@ -362,13 +453,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except TimeoutError:
                     pass
 
+        async def publish_worker_loop():
+            while not stop.is_set():
+                try:
+                    schema_ready = True
+                    if s.env in {"staging", "production"}:
+                        with session_factory() as check_session:
+                            revision = check_session.scalar(text("SELECT version_num FROM alembic_version"))
+                        schema_ready = revision == MIGRATION_HEAD
+                    if schema_ready:
+                        await asyncio.to_thread(recover_stale_publish_jobs, session_factory)
+                        await run_queued_publish_job()
+                    else:
+                        LOGGER.error("publish_worker_skipped migration_revision_mismatch")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    LOGGER.error("publish_worker_failed error_type=%s", type(exc).__name__)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=s.publish_worker_interval_seconds)
+                except TimeoutError:
+                    pass
+
         task = asyncio.create_task(cleanup_loop(), name="zttato-retention-cleanup")
+        worker_task = asyncio.create_task(publish_worker_loop(), name="zttato-publish-worker")
         _app.state.cleanup_task = task
+        _app.state.publish_worker_task = worker_task
         try:
             yield
         finally:
             stop.set()
-            await task
+            await asyncio.gather(task, worker_task, return_exceptions=True)
             engine.dispose()
 
     app = FastAPI(title="zTTato Creator", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
@@ -434,6 +549,193 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         locked.scopes = tokens.get("scope", locked.scopes)
         session.commit()
         return tokens["access_token"]
+
+    def claim_publish_job(job_id: str | None = None) -> str | None:
+        with session_factory() as session:
+            statement = select(PublishJob).where(PublishJob.status == "QUEUED")
+            if job_id:
+                statement = statement.where(PublishJob.id == job_id)
+            job = session.scalar(
+                statement.order_by(PublishJob.created_at, PublishJob.id).limit(1).with_for_update(skip_locked=True)
+            )
+            if not job:
+                return None
+            job.status = "INITIATING"
+            job.fail_reason = None
+            job.updated_at = int(time.time())
+            session.commit()
+            return job.id
+
+    def save_publish_state(
+        job_id: str,
+        *,
+        status: str,
+        fail_reason: str | None = None,
+        publish_id: str | None = None,
+        clear_request: bool = False,
+    ) -> None:
+        with session_factory() as session:
+            job = session.get(PublishJob, job_id)
+            if not job:
+                return
+            job.status = status
+            job.fail_reason = fail_reason
+            if publish_id is not None:
+                job.publish_id = publish_id
+            if clear_request:
+                job.request_cipher = None
+            job.updated_at = int(time.time())
+            session.commit()
+
+    async def execute_claimed_publish_job(job_id: str) -> None:
+        client: TikTokClient = app.state.tiktok
+        provider_publish_id: str | None = None
+        provider_init_started = False
+        try:
+            with session_factory() as session:
+                job = session.get(PublishJob, job_id)
+                if not job or job.status != "INITIATING" or not job.request_cipher:
+                    raise HTTPException(409, "Queued publish request is no longer available")
+                request_data = json.loads(cipher.decrypt(job.request_cipher))
+                payload = PublishInput(
+                    media_id=job.media_id,
+                    mode=job.mode,
+                    idempotency_key=job.idempotency_key,
+                    consent=True,
+                    **request_data,
+                )
+                if not job.request_fingerprint or not hmac.compare_digest(
+                    job.request_fingerprint, _publish_request_fingerprint(payload, s)
+                ):
+                    raise HTTPException(409, "Stored publish request integrity check failed")
+                row = session.get(BrowserSession, job.session_id)
+                if not row:
+                    raise HTTPException(401, "Browser session expired before publish processing")
+                media = session.scalar(
+                    select(MediaAsset).where(MediaAsset.id == job.media_id, MediaAsset.session_id == row.id)
+                )
+                if not media:
+                    raise HTTPException(404, "Media not found")
+                required_scope = "video.publish" if payload.mode == "direct" else "video.upload"
+                linked = account(row, session, required_scope)
+                token = await access(linked, session, client)
+                media_path = media.path
+                media_size = media.size
+                media_duration_ms = media.duration_ms
+                is_photo = payload.media_type == "photo"
+                photo_data = None
+                if is_photo:
+                    stored_photo = media.path
+                    if stored_photo.startswith(PHOTO_MEDIA_PREFIX):
+                        stored_photo = cipher.decrypt(stored_photo[len(PHOTO_MEDIA_PREFIX) :])
+                    photo_data = json.loads(stored_photo)
+                    validated_photo = PhotoMediaInput(
+                        photo_images=photo_data.get("images"),
+                        photo_cover_index=photo_data.get("cover_index"),
+                    )
+                    if not s.tiktok_verified_media_url_prefixes or any(
+                        not media_url_matches_verified_prefix(url, s.tiktok_verified_media_url_prefixes)
+                        for url in validated_photo.photo_images
+                    ):
+                        raise HTTPException(422, "Photo URL is outside the configured TikTok-verified prefix")
+                    photo_data = {
+                        "images": validated_photo.photo_images,
+                        "cover_index": validated_photo.photo_cover_index,
+                    }
+                else:
+                    root = Path(s.media_dir).resolve()
+                    resolved_media = Path(media_path).resolve()
+                    if not resolved_media.is_relative_to(root) or not resolved_media.is_file():
+                        raise HTTPException(404, "Uploaded video is no longer available")
+                    if media_duration_ms is None:
+                        media_duration_ms = mp4_duration_ms(media_path)
+                    if media_duration_ms <= 0 or media_duration_ms > MAX_TIKTOK_API_VIDEO_DURATION_SEC * 1000:
+                        raise HTTPException(422, "Video duration is outside Content Posting API limits")
+
+            privacy = None
+            if payload.mode == "direct":
+                creator = await client.creator_info(token)
+                options = creator.get("privacy_level_options", [])
+                if payload.privacy not in options:
+                    raise HTTPException(422, "Privacy selection is unavailable for this creator")
+                if not is_photo:
+                    max_duration = creator.get("max_video_post_duration_sec")
+                    if isinstance(max_duration, bool) or not isinstance(max_duration, int) or max_duration <= 0:
+                        raise HTTPException(502, "TikTok did not return the creator's current video duration limit")
+                    if media_duration_ms > min(max_duration, MAX_TIKTOK_API_VIDEO_DURATION_SEC) * 1000:
+                        raise HTTPException(422, "Video exceeds this creator's current TikTok duration limit")
+                if not s.app_audited and payload.privacy != "SELF_ONLY":
+                    raise HTTPException(422, "Unaudited clients must use SELF_ONLY")
+                if creator.get("comment_disabled") and not payload.disable_comment:
+                    raise HTTPException(422, "This creator has disabled comments")
+                privacy = payload.privacy
+
+            provider_init_started = True
+            if is_photo:
+                publish_id, _ = await client.init_photo(
+                    token,
+                    mode=payload.mode,
+                    caption=payload.caption,
+                    privacy=privacy,
+                    disable_comment=payload.disable_comment,
+                    brand_content_toggle=payload.brand_content_toggle,
+                    brand_organic_toggle=payload.brand_organic_toggle,
+                    is_aigc=payload.is_aigc,
+                    photo_images=photo_data["images"],
+                    photo_cover_index=photo_data["cover_index"],
+                )
+                provider_publish_id = publish_id
+                save_publish_state(
+                    job_id,
+                    status="PROCESSING",
+                    publish_id=publish_id,
+                    clear_request=True,
+                )
+            else:
+                publish_id, upload_url = await client.init_video(
+                    token,
+                    mode=payload.mode,
+                    media_size=media_size,
+                    caption=payload.caption,
+                    privacy=privacy,
+                    disable_comment=payload.disable_comment,
+                    disable_duet=payload.disable_duet,
+                    disable_stitch=payload.disable_stitch,
+                    brand_content_toggle=payload.brand_content_toggle,
+                    brand_organic_toggle=payload.brand_organic_toggle,
+                    is_aigc=payload.is_aigc,
+                )
+                provider_publish_id = publish_id
+                save_publish_state(
+                    job_id,
+                    status="TRANSFER_PENDING",
+                    publish_id=publish_id,
+                    clear_request=True,
+                )
+                await client.upload_video(upload_url, media_path, media_size)
+                save_publish_state(job_id, status="PROCESSING")
+        except Exception as exc:
+            if provider_publish_id:
+                status = "RECONCILIATION_REQUIRED"
+                reason = "TikTok returned a publish ID, but transfer completion is uncertain. Refresh status before retrying."
+            elif not provider_init_started or isinstance(exc, HTTPException) and exc.status_code < 500:
+                status = "INITIATION_FAILED"
+                reason = (
+                    "Publish preflight failed before TikTok accepted an operation. Review status before resubmitting."
+                )
+            else:
+                status = "INITIATION_UNCERTAIN"
+                reason = "TikTok did not confirm request acceptance. Keep the same request key and check account status before retrying."
+            try:
+                save_publish_state(job_id, status=status, fail_reason=reason, clear_request=True)
+            except Exception as persist_exc:
+                LOGGER.error("publish_job_state_persist_failed error_type=%s", type(persist_exc).__name__)
+            LOGGER.warning("publish_job_processing_failed status=%s error_type=%s", status, type(exc).__name__)
+
+    async def run_queued_publish_job(job_id: str | None = None) -> None:
+        claimed_id = await asyncio.to_thread(claim_publish_job, job_id)
+        if claimed_id:
+            await execute_claimed_publish_job(claimed_id)
 
     def issue_cookies(response, raw: str, csrf: str):
         response.set_cookie(COOKIE, raw, max_age=86400, secure=s.secure_cookies, httponly=True, samesite="lax")
@@ -568,7 +870,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         supplied = request.headers.get("authorization", "")
         if not secrets.compare_digest(supplied, "Bearer " + s.metrics_bearer_token):
             raise HTTPException(404, "Not found")
-        return PlainTextResponse(_prometheus_metrics(s.media_dir), media_type="text/plain; version=0.0.4")
+        queued = select(func.count(PublishJob.id)).where(PublishJob.status == "QUEUED")
+        oldest = select(func.min(PublishJob.created_at)).where(PublishJob.status == "QUEUED")
+        with session_factory() as session:
+            queue_depth = session.scalar(queued) or 0
+            queued_at = session.scalar(oldest)
+        queue_age = max(0, int(time.time()) - queued_at) if queued_at else 0
+        return PlainTextResponse(
+            _prometheus_metrics(
+                s.media_dir,
+                publish_queue_depth=queue_depth,
+                publish_queue_oldest_age_seconds=queue_age,
+            ),
+            media_type="text/plain; version=0.0.4",
+        )
 
     @app.get("/", include_in_schema=False)
     def homepage():
@@ -644,7 +959,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def ready(session: Session = Depends(db)):
         try:
             session.execute(text("SELECT 1"))
-            if s.env == "production":
+            if s.env in {"staging", "production"}:
                 revision = session.scalar(text("SELECT version_num FROM alembic_version"))
                 if revision != MIGRATION_HEAD:
                     raise HTTPException(503, "Database migration is not current")
@@ -671,6 +986,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "scopes": linked.scopes.split(",") if linked else [],
                 "audited": s.app_audited,
                 "legal_ready": bool(s.legal_entity and s.legal_email and s.legal_address),
+                "photo_transfer_ready": bool(s.tiktok_verified_media_url_prefixes),
             }
         )
         if new_cookie_values:
@@ -859,60 +1175,63 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/media/photo")
     async def add_photo_media(
         request: Request,
-        payload: dict,
+        payload: PhotoMediaInput,
         session: Session = Depends(db),
         row: BrowserSession = Depends(current),
     ):
         require_csrf(request, row)
         account(row, session)
-        photo_images = payload.get("photo_images", [])
-        photo_cover_index = payload.get("photo_cover_index", 0)
-        if not photo_images or not isinstance(photo_images, list):
-            raise HTTPException(422, "photo_images array is required")
-        if len(photo_images) > 35:
-            raise HTTPException(422, "Maximum 35 photos allowed")
-        if photo_cover_index < 0 or photo_cover_index >= len(photo_images):
-            raise HTTPException(422, "Invalid photo_cover_index")
-        for url in photo_images:
-            if not url.startswith("https://"):
-                raise HTTPException(422, "Photo URLs must use HTTPS")
+        if not s.tiktok_verified_media_url_prefixes:
+            raise HTTPException(503, "Photo Post requires a configured TikTok-verified media URL prefix")
+        if any(
+            not media_url_matches_verified_prefix(url, s.tiktok_verified_media_url_prefixes)
+            for url in payload.photo_images
+        ):
+            raise HTTPException(422, "Photo URLs must be under a configured TikTok-verified media URL prefix")
+        photo_images = payload.photo_images
+        photo_cover_index = payload.photo_cover_index
         item_id = str(uuid.uuid4())
+        photo_json = json.dumps({"images": photo_images, "cover_index": photo_cover_index})
         asset = MediaAsset(
             id=item_id,
             session_id=row.id,
             filename="photo_set.json",
-            size=len(json.dumps({"images": photo_images, "cover_index": photo_cover_index})),
-            path=json.dumps({"images": photo_images, "cover_index": photo_cover_index}),
+            size=len(photo_json.encode("utf-8")),
+            path=PHOTO_MEDIA_PREFIX + cipher.encrypt(photo_json),
         )
         session.add(asset)
         session.commit()
         return {"media_id": item_id, "filename": asset.filename, "size": asset.size}
 
-    @app.post("/api/publish")
+    @app.post("/api/publish", status_code=202)
     async def publish(
         request: Request,
         payload: PublishInput,
+        background_tasks: BackgroundTasks,
         row: BrowserSession = Depends(current),
         session: Session = Depends(db),
-        client: TikTokClient = Depends(tiktok),
     ):
         require_csrf(request, row)
         if not payload.consent:
             raise HTTPException(422, "Explicit confirmation is required")
         if payload.mode not in ("draft", "direct"):
             raise HTTPException(422, "Choose draft or direct")
+        request_fingerprint = _publish_request_fingerprint(payload, s)
         earlier = session.scalar(
             select(PublishJob).where(
                 PublishJob.session_id == row.id, PublishJob.idempotency_key == payload.idempotency_key
             )
         )
         if earlier:
-            if earlier.media_id != payload.media_id or earlier.mode != payload.mode:
-                raise HTTPException(409, "Idempotency key already belongs to a different request")
+            if not earlier.request_fingerprint or not hmac.compare_digest(
+                earlier.request_fingerprint, request_fingerprint
+            ):
+                raise HTTPException(409, "Idempotency key already belongs to a different or legacy request")
+            if earlier.status == "QUEUED":
+                background_tasks.add_task(run_queued_publish_job, earlier.id)
             return {
                 "job_id": earlier.id,
                 "status": earlier.status,
-                "publish_id": earlier.publish_id,
                 "idempotent_replay": True,
             }
         media = session.scalar(
@@ -925,44 +1244,84 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         is_photo = payload.media_type == "photo"
         photo_data = None
         if is_photo:
+            encoded_photo_data = media.path
+            legacy_photo_data = not encoded_photo_data.startswith(PHOTO_MEDIA_PREFIX)
+            if not legacy_photo_data:
+                try:
+                    encoded_photo_data = cipher.decrypt(encoded_photo_data[len(PHOTO_MEDIA_PREFIX) :])
+                except HTTPException as exc:
+                    raise HTTPException(503, "Photo media key unavailable; re-upload this photo set") from exc
             try:
-                photo_data = json.loads(media.path)
+                photo_data = json.loads(encoded_photo_data)
             except (json.JSONDecodeError, TypeError):
                 raise HTTPException(422, "Invalid photo media data")
+            if not isinstance(photo_data, dict):
+                raise HTTPException(422, "Invalid photo media data")
+            try:
+                validated_photo = PhotoMediaInput(
+                    photo_images=photo_data.get("images"),
+                    photo_cover_index=photo_data.get("cover_index"),
+                )
+            except (TypeError, ValidationError) as exc:
+                raise HTTPException(422, "Invalid photo media data") from exc
+            if not s.tiktok_verified_media_url_prefixes:
+                raise HTTPException(503, "Photo Post requires a configured TikTok-verified media URL prefix")
+            if any(
+                not media_url_matches_verified_prefix(url, s.tiktok_verified_media_url_prefixes)
+                for url in validated_photo.photo_images
+            ):
+                raise HTTPException(422, "Photo URLs must be under a configured TikTok-verified media URL prefix")
+            photo_data = {
+                "images": validated_photo.photo_images,
+                "cover_index": validated_photo.photo_cover_index,
+            }
+            if legacy_photo_data:
+                media.path = PHOTO_MEDIA_PREFIX + cipher.encrypt(json.dumps(photo_data))
+                session.commit()
+        else:
+            if not Path(media.path).is_file():
+                raise HTTPException(404, "Upload a video first")
+            duration_ms = media.duration_ms
+            if duration_ms is None:
+                try:
+                    duration_ms = mp4_duration_ms(media.path)
+                except (InvalidMP4, OSError) as exc:
+                    raise HTTPException(422, "Uploaded MP4 duration could not be validated") from exc
+            if duration_ms <= 0:
+                raise HTTPException(422, "Uploaded MP4 duration could not be validated")
+            if duration_ms > MAX_TIKTOK_API_VIDEO_DURATION_SEC * 1000:
+                raise HTTPException(422, "TikTok Content Posting API supports video uploads up to 10 minutes")
 
         required_scope = "video.publish" if payload.mode == "direct" else "video.upload"
-        linked = account(row, session, required_scope)
-        token = await access(linked, session, client)
-        privacy = None
-        if payload.mode == "direct":
-            creator = await client.creator_info(token)
-            options = creator.get("privacy_level_options", [])
-            if payload.privacy not in options:
-                raise HTTPException(422, "Privacy selection is unavailable for this creator")
-            max_duration = creator.get("max_video_post_duration_sec")
-            if not is_photo:
-                if isinstance(max_duration, bool) or not isinstance(max_duration, int) or max_duration <= 0:
-                    raise HTTPException(502, "TikTok did not return the creator's current video duration limit")
-                duration_ms = media.duration_ms
-                if duration_ms is None:
-                    try:
-                        duration_ms = mp4_duration_ms(media.path)
-                    except (InvalidMP4, OSError) as exc:
-                        raise HTTPException(422, "Uploaded MP4 duration could not be validated") from exc
-                if duration_ms > max_duration * 1000:
-                    raise HTTPException(422, "Video exceeds this creator's current TikTok duration limit")
-            if not s.app_audited and payload.privacy != "SELF_ONLY":
-                raise HTTPException(422, "Unaudited clients must use SELF_ONLY")
-            if creator.get("comment_disabled") and not payload.disable_comment:
-                raise HTTPException(422, "This creator has disabled comments")
-            privacy = payload.privacy
+        account(row, session, required_scope)
+        if payload.mode == "direct" and not payload.privacy:
+            raise HTTPException(422, "Choose a current creator privacy option before publishing")
+        if payload.mode == "direct" and not s.app_audited and payload.privacy != "SELF_ONLY":
+            raise HTTPException(422, "Unaudited clients must use SELF_ONLY")
+        encrypted_request = payload.model_dump(
+            include={
+                "caption",
+                "privacy",
+                "disable_comment",
+                "disable_duet",
+                "disable_stitch",
+                "brand_content_toggle",
+                "brand_organic_toggle",
+                "is_aigc",
+                "media_type",
+            }
+        )
         job = PublishJob(
             id=str(uuid.uuid4()),
             session_id=row.id,
             idempotency_key=payload.idempotency_key,
             media_id=media.id,
             mode=payload.mode,
-            status="INITIATING",
+            status="QUEUED",
+            request_fingerprint=request_fingerprint,
+            consented_at=int(time.time()),
+            consent_version=PUBLISH_CONSENT_VERSION,
+            request_cipher=cipher.encrypt(json.dumps(encrypted_request, ensure_ascii=False)),
         )
         session.add(job)
         try:
@@ -975,68 +1334,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
             )
             if earlier:
+                if not earlier.request_fingerprint or not hmac.compare_digest(
+                    earlier.request_fingerprint, request_fingerprint
+                ):
+                    raise HTTPException(409, "Idempotency key already belongs to a different or legacy request")
+                if earlier.status == "QUEUED":
+                    background_tasks.add_task(run_queued_publish_job, earlier.id)
                 return {
                     "job_id": earlier.id,
                     "status": earlier.status,
-                    "publish_id": earlier.publish_id,
                     "idempotent_replay": True,
                 }
             raise
-        try:
-            if is_photo:
-                if not photo_data:
-                    raise HTTPException(422, "Invalid photo media data")
-                publish_id, _ = await client.init_photo(
-                    token,
-                    mode=payload.mode,
-                    caption=payload.caption,
-                    privacy=privacy,
-                    disable_comment=payload.disable_comment,
-                    brand_content_toggle=payload.brand_content_toggle,
-                    brand_organic_toggle=payload.brand_organic_toggle,
-                    is_aigc=payload.is_aigc,
-                    photo_images=photo_data.get("images", []),
-                    photo_cover_index=photo_data.get("cover_index", 0),
-                )
-                job.publish_id = publish_id
-                job.status = "PROCESSING"
-            else:
-                if not media or not Path(media.path).is_file():
-                    raise HTTPException(404, "Upload a video first")
-                publish_id, upload_url = await client.init_video(
-                    token,
-                    mode=payload.mode,
-                    media_size=media.size,
-                    caption=payload.caption,
-                    privacy=privacy,
-                    disable_comment=payload.disable_comment,
-                    disable_duet=payload.disable_duet,
-                    disable_stitch=payload.disable_stitch,
-                    brand_content_toggle=payload.brand_content_toggle,
-                    brand_organic_toggle=payload.brand_organic_toggle,
-                    is_aigc=payload.is_aigc,
-                )
-                job.publish_id = publish_id
-                job.status = "TRANSFER_PENDING"
-            job.updated_at = int(time.time())
-            session.commit()
-            if not is_photo:
-                await client.upload_video(upload_url, media.path, media.size)
-                job.status = "PROCESSING"
-                job.updated_at = int(time.time())
-                session.commit()
-        except Exception:
-            job.status = "RECONCILIATION_REQUIRED" if job.publish_id else "INITIATION_FAILED"
-            job.updated_at = int(time.time())
-            session.commit()
-            raise
+        background_tasks.add_task(run_queued_publish_job, job.id)
         return {
             "job_id": job.id,
-            "status": job.status,
-            "publish_id": job.publish_id,
-            "note": "Draft uploads require the creator to finish posting inside TikTok."
-            if payload.mode == "draft"
-            else "TikTok is processing your consented direct post.",
+            "status": "QUEUED",
+            "note": "Saved securely; TikTok processing will continue in the background.",
         }
 
     @app.get("/api/jobs/{job_id}")
@@ -1066,7 +1380,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": job.status,
             "fail_reason": job.fail_reason,
             "mode": job.mode,
-            "publish_id": job.publish_id,
         }
 
     @app.post("/api/disconnect")

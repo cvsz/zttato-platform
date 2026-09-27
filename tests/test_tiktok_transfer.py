@@ -100,6 +100,48 @@ def test_init_video_declares_correct_chunk_count():
     }
 
 
+@pytest.mark.parametrize("mode", ("draft", "direct"))
+def test_init_photo_sends_description_for_both_modes_and_top_level_ai_flag(mode):
+    captured = []
+
+    async def handler(request):
+        captured.append(json.loads(await request.aread()))
+        return httpx.Response(200, json={"error": {"code": "ok"}, "data": {"publish_id": "photo-job"}})
+
+    client = TikTokClient(None, transport=httpx.MockTransport(handler))
+    publish_id, upload_url = asyncio.run(
+        client.init_photo(
+            "fixture-access-token",
+            mode=mode,
+            caption="A photo caption 😀",
+            privacy="SELF_ONLY" if mode == "direct" else None,
+            disable_comment=True,
+            brand_content_toggle=False,
+            brand_organic_toggle=True,
+            is_aigc=True,
+            photo_images=["https://media.example/photo.webp"],
+            photo_cover_index=0,
+        )
+    )
+
+    assert publish_id == "photo-job"
+    assert upload_url == ""
+    request = captured[0]
+    assert request["post_info"]["description"] == "A photo caption 😀"
+    assert "title" not in request["post_info"]
+    assert request["is_aigc"] is True
+    assert request["media_type"] == "PHOTO"
+    assert request["post_mode"] == ("DIRECT_POST" if mode == "direct" else "MEDIA_UPLOAD")
+    assert request["source_info"] == {
+        "source": "PULL_FROM_URL",
+        "photo_images": ["https://media.example/photo.webp"],
+        "photo_cover_index": 0,
+    }
+    if mode == "direct":
+        assert request["post_info"]["privacy_level"] == "SELF_ONLY"
+        assert request["post_info"]["brand_organic_toggle"] is True
+
+
 def test_upload_streams_sequential_chunks_without_losing_trailing_bytes(tmp_path: Path):
     size = 64 * 1024**2 + 123
     media = tmp_path / "fixture.mp4"

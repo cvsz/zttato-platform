@@ -41,6 +41,10 @@ TikTok ปัจจุบันจำกัด Direct Post init 6 requests/minut
 
 Official references: [Scopes reference](https://developers.tiktok.com/docs/en/tiktok-api-scopes), [Direct Post](https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post), [Query Creator Info](https://developers.tiktok.com/docs/en/content-posting-api-reference-query-creator-info), [Share Kit](https://developers.tiktok.com/products/share-kit).
 
+## Ambiguous publish initiation
+
+The API first commits a session-scoped durable queue job and returns HTTP 202. A worker claims queued rows with PostgreSQL `FOR UPDATE SKIP LOCKED`; on restart it resumes only rows still `QUEUED`. It never repeats an external operation after a claim. The selected caption/options are Fernet-encrypted while queued and cleared after preflight/provider init; the row retains an HMAC fingerprint, consent version and timestamp. Reusing the same key with changed options returns HTTP 409. Legacy jobs without a fingerprint cannot be safely reused for a new publish request, but their status remains available. If initiation fails or times out before TikTok returns a `publish_id`, the API keeps that job as `INITIATION_UNCERTAIN`; the dashboard exposes saved-job status refresh. The `publish_id` remains server-side and the dashboard polls by its session-owned `job_id`. If an edge proxy returns an unstructured 502, keep the page open and use the same request key; do not start a new request until TikTok status/account state has been checked. A job with a `publish_id` remains `RECONCILIATION_REQUIRED` until upstream status can be refreshed. A worker marks stale `INITIATING` and `TRANSFER_PENDING` jobs uncertain after 15 minutes; it never reissues the external operation.
+
 ## Verification matrix
 
 | Case | Test | Required remote evidence |

@@ -13,6 +13,8 @@ tests:
         values: "0+80x140"
       - series: 'zttato_http_requests_total{method="GET",status="429"}'
         values: "0+70x140"
+      - series: zttato_publish_queue_oldest_age_seconds
+        values: "0+950x140"
       - series: 'zttato_oauth_failures_total{status="400"}'
         values: "0+2x140"
       - series: 'zttato_cleanup_runs_total{result="failure"}'
@@ -44,6 +46,14 @@ tests:
             exp_annotations:
               summary: zTTato is returning more than one 429 response per second
               description: Separate application quota rejections from TikTok upstream limits before changing thresholds.
+      - eval_time: 11m
+        alertname: ZttatoPublishQueueBacklog
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: A consented publish request has waited in the queue for more than fifteen minutes
+              description: Check worker health, current schema revision, and provider availability; do not replay with a new key.
       - eval_time: 11m
         alertname: ZttatoOAuthFailures
         exp_alerts:

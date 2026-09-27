@@ -12,7 +12,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-MIGRATION_HEAD = "20260927_02"
+MIGRATION_HEAD = "20260927_04"
 
 
 class Base(DeclarativeBase):
@@ -67,6 +67,10 @@ class PublishJob(Base):
     publish_id: Mapped[str | None] = mapped_column(String(160), nullable=True)
     status: Mapped[str] = mapped_column(String(40), default="INITIATING")
     fail_reason: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    consented_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    consent_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    request_cipher: Mapped[str | None] = mapped_column(Text, nullable=True)
     checked_at: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
     updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True, default=lambda: int(time.time()))

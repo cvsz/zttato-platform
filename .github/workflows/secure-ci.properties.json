@@ -1,6 +1,6 @@
 {
-  "name": "ZeaZDev Secure CI Baseline",
-  "description": "Minimal least-privilege CI baseline. Extend with project-specific lint, tests, build, integration, and security checks.",
+  "name": "zTTato Secure CI",
+  "description": "Redacted Gitleaks scanning of changed commits and pip-audit checks for runtime and development dependencies.",
   "iconName": "octicon shield-check",
   "categories": ["Continuous integration"]
 }

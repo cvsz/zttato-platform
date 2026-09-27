@@ -223,19 +223,19 @@ class TikTokClient:
         photo_images: list[str],
         photo_cover_index: int,
     ) -> tuple[str, str]:
+        post_info = {"description": caption}
         if mode == "direct":
             endpoint = "/v2/post/publish/content/init/"
-            post_info = {
-                "title": caption,
-                "privacy_level": privacy,
-                "disable_comment": disable_comment,
-                "brand_content_toggle": brand_content_toggle,
-                "brand_organic_toggle": brand_organic_toggle,
-                "is_aigc": is_aigc,
-            }
+            post_info.update(
+                {
+                    "privacy_level": privacy,
+                    "disable_comment": disable_comment,
+                    "brand_content_toggle": brand_content_toggle,
+                    "brand_organic_toggle": brand_organic_toggle,
+                }
+            )
         elif mode == "draft":
             endpoint = "/v2/post/publish/content/init/"
-            post_info = {}
         else:
             raise HTTPException(422, "Unsupported mode")
         source_info = {
@@ -248,6 +248,7 @@ class TikTokClient:
             "source_info": source_info,
             "post_mode": "DIRECT_POST" if mode == "direct" else "MEDIA_UPLOAD",
             "media_type": "PHOTO",
+            "is_aigc": is_aigc,
         }
         payload = await self._request("POST", self.API + endpoint, token=access_token, data=request)
         result = payload.get("data", {})

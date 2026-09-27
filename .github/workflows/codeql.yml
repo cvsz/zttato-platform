@@ -11,25 +11,52 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   analyze:
-    name: Analyze
+    name: Analyze ${{ matrix.language }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
     strategy:
       fail-fast: false
       matrix:
-        language: [javascript-typescript, python]
+        language: [actions, javascript-typescript, python]
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
+        uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
+          config-file: ./.github/codeql-config.yml
       - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
+        if: matrix.language != 'actions'
+        uses: github/codeql-action/autobuild@v4
       - name: Analyze
-        uses: github/codeql-action/analyze@v3
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  required-analysis:
+    name: Analyze Python and Actions
+    needs: analyze
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require every CodeQL language analysis
+        shell: bash
+        env:
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
+        run: |
+          set -euo pipefail
+          if [[ "$ANALYZE_RESULT" != "success" ]]; then
+            echo "CodeQL language matrix result: $ANALYZE_RESULT" >&2
+            exit 1
+          fi

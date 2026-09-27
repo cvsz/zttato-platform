@@ -19,4 +19,4 @@ COPY --chown=zttato:zttato web/ ./web/
 USER zttato
 EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD python -c "import urllib.request; req = urllib.request.Request('http://127.0.0.1:8000/health/live', headers={'Host': 'zttato.zeaz.dev'}); urllib.request.urlopen(req, timeout=3)"
-CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--proxy-headers","--forwarded-allow-ips","127.0.0.1"]
+CMD ["uvicorn","app.main:app","--host","0.0.0.0","--port","8000","--proxy-headers","--forwarded-allow-ips","127.0.0.1","--no-access-log"]

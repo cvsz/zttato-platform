@@ -2,12 +2,14 @@
 (() => {
   const $ = (id) => document.getElementById(id);
 
-  const account = { connected: false, scopes: [], audited: false };
-  let mediaId = null;
+  const account = { connected: false, scopes: [], audited: false, photo_transfer_ready: false };
+  const mediaAssets = { video: null, photo: null };
+  let activeMediaType = "video";
   let jobId = null;
   let idempotencyKey = null;
   let sending = false;
   let selectedFile = null;
+  let photoPreparing = false;
 
   const labels = {
     PUBLIC_TO_EVERYONE: "Everyone",
@@ -20,6 +22,14 @@
     const el = $(id);
     if (el) el.textContent = message;
   };
+
+  function translated(key, fallback) {
+    if (typeof i18n !== "undefined" && i18n && typeof i18n.t === "function") {
+      const value = i18n.t(key);
+      if (value !== key) return value;
+    }
+    return fallback;
+  }
 
   function csrf() {
     const item = document.cookie
@@ -36,12 +46,18 @@
     }
     const response = await fetch(path, opts);
     if (!response.ok) {
-      let reason = "Request failed (" + response.status + ")";
+      let detail = null;
       try {
         const data = await response.json();
-        reason = data.detail || reason;
+        detail = data.detail ?? null;
       } catch (_) {}
-      throw new Error(typeof reason === "string" ? reason : "Request rejected.");
+      const message = typeof detail === "string"
+        ? detail
+        : (typeof detail?.message === "string" ? detail.message : "Request failed (" + response.status + ")");
+      const error = new Error(message);
+      error.status = response.status;
+      error.detail = detail && typeof detail === "object" ? detail : null;
+      throw error;
     }
     return response.json();
   }
@@ -52,7 +68,34 @@
   }
 
   function mode() {
-    return $("mode-direct")?.checked ? "direct" : "draft";
+    const directId = activeMediaType === "photo" ? "photo-mode-direct" : "mode-direct";
+    return $(directId)?.checked ? "direct" : "draft";
+  }
+
+  function activeMediaId() {
+    return mediaAssets[activeMediaType];
+  }
+
+  function canPreparePhoto() {
+    return account.scopes.includes("video.upload") || account.scopes.includes("video.publish");
+  }
+
+  function privacySelect() {
+    return $(activeMediaType === "photo" ? "photo-privacy" : "privacy");
+  }
+
+  function resetIntent(clearConsent = false) {
+    idempotencyKey = null;
+    jobId = null;
+    $("refresh-status").disabled = true;
+    if (clearConsent && $("consent")) $("consent").checked = false;
+  }
+
+  function activateMediaType(type) {
+    if (activeMediaType !== type) {
+      activeMediaType = type;
+      resetIntent(true);
+    }
   }
 
   function formatBytes(bytes) {
@@ -66,27 +109,99 @@
     text("caption-count", len + " / 2200");
   }
 
+  function updatePhotoCaptionCount() {
+    const len = $("photo-caption")?.value.length || 0;
+    text("photo-caption-count", len + " / 4000");
+  }
+
+  function photoForm() {
+    const raw = $("photo-urls")?.value || "";
+    const urls = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!urls.length) return { urls, error: "photo.error_urls" };
+    if (urls.length > 35) return { urls, error: "photo.error_max" };
+
+    for (const value of urls) {
+      if (/\s/.test(value)) return { urls, error: "photo.error_url" };
+      try {
+        const parsed = new URL(value);
+        const isIpv4 = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(parsed.hostname);
+        const isIpv6 = parsed.hostname.includes(":");
+        if (
+          parsed.protocol !== "https:" ||
+          !parsed.hostname.includes(".") ||
+          isIpv4 ||
+          isIpv6 ||
+          parsed.username ||
+          parsed.password ||
+          parsed.hash ||
+          (parsed.port && parsed.port !== "443")
+        ) return { urls, error: "photo.error_https" };
+        const suffix = parsed.pathname.match(/\.([^.\/]+)$/)?.[1]?.toLowerCase();
+        if (suffix && !["jpg", "jpeg", "webp"].includes(suffix)) {
+          return { urls, error: "photo.error_format" };
+        }
+      } catch (_) {
+        return { urls, error: "photo.error_url" };
+      }
+    }
+
+    const cover = Number($("photo-cover")?.value);
+    if (!Number.isInteger(cover) || cover < 0 || cover >= urls.length) {
+      return { urls, error: "photo.error_cover" };
+    }
+    return { urls, cover, error: null };
+  }
+
+  function updatePhotoPreparationButton() {
+    const button = $("photo-upload");
+    if (!button) return;
+    if (!account.photo_transfer_ready) {
+      button.disabled = true;
+      if (account.connected) {
+        text("photo-result", translated(
+          "dashboard.photo.url_property_missing",
+          "Photo Post is disabled until TikTok verifies and configures a media URL prefix."
+        ));
+      }
+      return;
+    }
+    const { error } = photoForm();
+    button.disabled = photoPreparing || !account.connected || !canPreparePhoto() || Boolean(error);
+    if (error && $("photo-urls")?.value.trim()) {
+      const fallbacks = {
+        "photo.error_urls": "Please enter at least one photo URL.",
+        "photo.error_max": "Maximum 35 photos allowed.",
+        "photo.error_https": "All photo URLs must use HTTPS on a public domain.",
+        "photo.error_cover": "Cover index must select one of the supplied photos.",
+        "photo.error_url": "Enter a valid photo URL without spaces or redirects.",
+        "photo.error_format": "TikTok Photo Post supports JPEG and WebP only."
+      };
+      text("photo-result", translated(error, fallbacks[error] || "Check the photo URLs."));
+    }
+  }
+
   function buildSummary() {
     const card = $("summary");
     if (!card) return;
 
-    if (!mediaId) {
-      card.textContent = "Upload an MP4 first.";
+    if (!activeMediaId()) {
+      card.textContent = translated("dashboard.review.summary_none", "Upload or prepare media first.");
       return;
     }
 
+    const isPhoto = activeMediaType === "photo";
     const parts = [];
-    parts.push("Video ready in workspace");
+    parts.push(isPhoto ? "Photo set ready in workspace" : "Video ready in workspace");
     parts.push(`Mode · ${mode() === "draft" ? "Draft (finish inside TikTok)" : "Direct Post"}`);
 
     if (mode() === "direct") {
-      const privacy = $("privacy")?.value;
+      const privacy = privacySelect()?.value;
       parts.push(`Visibility · ${labels[privacy] || privacy || "—"}`);
 
       const disclosures = [];
-      if ($("own-brand")?.checked) disclosures.push("Own business");
-      if ($("paid-brand")?.checked) disclosures.push("Paid partnership");
-      if ($("ai-content")?.checked) disclosures.push("AI-generated");
+      if ($(isPhoto ? "photo-own-brand" : "own-brand")?.checked) disclosures.push("Own business");
+      if ($(isPhoto ? "photo-paid-brand" : "paid-brand")?.checked) disclosures.push("Paid partnership");
+      if ($(isPhoto ? "photo-ai-content" : "ai-content")?.checked) disclosures.push("AI-generated");
       if (disclosures.length) {
         parts.push(`Disclosures · ${disclosures.join(", ")}`);
       }
@@ -119,22 +234,29 @@
   }
 
   function review() {
-    $("direct-options")?.classList.toggle("hidden", mode() !== "direct");
+    const direct = mode() === "direct";
+    $("direct-options")?.classList.toggle("hidden", !direct || activeMediaType !== "video");
+    $("photo-direct-options")?.classList.toggle("hidden", !direct || activeMediaType !== "photo");
 
     const ready =
-      Boolean(mediaId) &&
+      Boolean(activeMediaId()) &&
       Boolean($("consent")?.checked) &&
       !sending;
 
     const publish = $("publish");
     if (publish) {
+      const modeControl = $(activeMediaType === "photo" ? "photo-mode-direct" : "mode-direct");
+      const draftControl = $(activeMediaType === "photo" ? "photo-mode-draft" : "mode-draft");
       const directBlocked =
-        mode() === "direct" &&
-        (!$("privacy")?.value ||
+        direct &&
+        (!privacySelect()?.value ||
           !account.scopes.includes("video.publish") ||
-          Boolean($("mode-direct")?.disabled));
+          Boolean(modeControl?.disabled));
+      const draftBlocked = !direct && (
+        !account.scopes.includes("video.upload") || Boolean(draftControl?.disabled)
+      );
 
-      publish.disabled = !ready || directBlocked;
+      publish.disabled = !ready || directBlocked || draftBlocked;
     }
 
     buildSummary();
@@ -196,59 +318,71 @@
   async function loadCreator() {
     if (!account.scopes.includes("video.publish")) {
       $("mode-direct").disabled = true;
+      $("photo-mode-direct").disabled = true;
       text(
         "creator-message",
         "Direct Post requires the video.publish scope. Reconnect TikTok with this permission."
       );
+      text("photo-creator-message", "Direct Post requires the video.publish scope. Reconnect TikTok with this permission.");
       review();
       return;
     }
 
     try {
       const info = await api("/api/creator-info");
-      const select = $("privacy");
-      select.replaceChildren();
-
       const choices = info.privacy_level_options.filter(
         (value) => account.audited || value === "SELF_ONLY"
       );
 
-      for (const value of choices) {
-        const option = document.createElement("option");
-        option.value = value;
-        option.textContent = labels[value] || value;
-        select.append(option);
+      for (const selectId of ["privacy", "photo-privacy"]) {
+        const select = $(selectId);
+        select.replaceChildren();
+        for (const value of choices) {
+          const option = document.createElement("option");
+          option.value = value;
+          option.textContent = labels[value] || value;
+          select.append(option);
+        }
+        select.disabled = choices.length === 0;
       }
 
-      select.disabled = choices.length === 0;
       setCreatorFlag("disable-comment", info.comment_disabled);
       setCreatorFlag("disable-duet", info.duet_disabled);
       setCreatorFlag("disable-stitch", info.stitch_disabled);
+      setCreatorFlag("photo-disable-comment", info.comment_disabled);
 
-      text(
-        "creator-message",
+      const creatorMessage =
         "Connected: " +
-          (info.nickname || info.username || "TikTok creator") +
-          (account.audited ? "." : " · Unaudited app: Direct Post is limited to Only me.") +
-          (info.max_video_post_duration_sec
-            ? " Max video duration: " + info.max_video_post_duration_sec + " seconds."
-            : "")
-      );
+        (info.nickname || info.username || "TikTok creator") +
+        (account.audited ? "." : " · Unaudited app: Direct Post is limited to Only me.");
+      const creatorDuration = info.max_video_post_duration_sec;
+      const apiDuration = Number.isInteger(creatorDuration) && creatorDuration > 0
+        ? Math.min(creatorDuration, 600)
+        : 600;
+      text("creator-message", creatorMessage + (info.max_video_post_duration_sec
+        ? ` Max video duration via this app: ${apiDuration} seconds` +
+          (creatorDuration > apiDuration ? ` (TikTok creator limit: ${creatorDuration} seconds).` : ".")
+        : ` Max video duration via this app: ${apiDuration} seconds.`));
+      text("photo-creator-message", creatorMessage);
 
-      if (!choices.length) $("mode-direct").disabled = true;
+      if (!choices.length) {
+        $("mode-direct").disabled = true;
+        $("photo-mode-direct").disabled = true;
+      }
     } catch (err) {
-      if ($("mode-direct")) $("mode-direct").disabled = true;
+      $("mode-direct").disabled = true;
+      $("photo-mode-direct").disabled = true;
       text("creator-message", "Creator options unavailable: " + err.message);
+      text("photo-creator-message", "Creator options unavailable: " + err.message);
     }
     review();
   }
 
   function setFile(file) {
     selectedFile = file || null;
-    mediaId = null;
-    jobId = null;
-    idempotencyKey = null;
-    $("refresh-status").disabled = true;
+    mediaAssets.video = null;
+    activeMediaType = "video";
+    resetIntent(true);
     text("media-result", "");
 
     const preview = $("file-preview");
@@ -271,32 +405,39 @@
 
   async function boot() {
     try {
-      // Initialize optional i18n (non-blocking, with fallback).
+      // Initialize i18n (non-blocking, with fallback)
       if (typeof i18n !== "undefined" && i18n) {
         try {
           if (typeof i18n.init === "function") await i18n.init();
         } catch (i18nErr) {
-          console.warn("i18n init failed, continuing without translations:", i18nErr);
+          console.warn('i18n init failed, continuing without translations:', i18nErr);
         }
+        // Apply translations to static elements
         if (typeof document.querySelectorAll === "function") {
           document.querySelectorAll('[data-i18n]').forEach(el => {
             const key = el.getAttribute('data-i18n');
             if (key && typeof i18n.t === "function") el.textContent = i18n.t(key);
           });
+          // Apply placeholder translations
           document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
             const key = el.getAttribute('data-i18n-placeholder');
             if (key && typeof i18n.t === "function") el.placeholder = i18n.t(key);
           });
         }
+
+        // Language selector (real-time, no reload)
         const langSelect = $('lang-select');
         if (langSelect && typeof i18n.getLocale === "function") {
           langSelect.value = i18n.getLocale();
-          if (typeof i18n.setLocale === "function") {
-            langSelect.addEventListener('change', async (e) => {
-              await i18n.setLocale(e.target.value);
-              location.reload();
-            });
-          }
+          langSelect.addEventListener('change', async (e) => {
+            if (typeof i18n.setLocale === "function") await i18n.setLocale(e.target.value);
+            review();
+          });
+        }
+        if (typeof i18n.subscribe === "function") {
+          i18n.subscribe(() => {
+            review();
+          });
         }
       }
 
@@ -325,14 +466,20 @@
         renderScopeChips(data.scopes);
         $("mode-draft").disabled = !data.scopes.includes("video.upload");
         $("mode-direct").disabled = !data.scopes.includes("video.publish");
+        $("photo-mode-draft").disabled = !data.scopes.includes("video.upload");
+        $("photo-mode-direct").disabled = !data.scopes.includes("video.publish");
         if ($("mode-draft").disabled && !$("mode-direct").disabled) {
           $("mode-direct").checked = true;
+        }
+        if ($("photo-mode-draft").disabled && !$("photo-mode-direct").disabled) {
+          $("photo-mode-direct").checked = true;
         }
         await Promise.all([loadProfile(), loadCreator()]);
       }
     } catch (err) {
       text("connection", err.message);
     }
+    updatePhotoPreparationButton();
     review();
   }
 
@@ -388,7 +535,9 @@
       const form = new FormData();
       form.append("file", file, file.name);
       const asset = await api("/api/media", { method: "POST", body: form });
-      mediaId = asset.media_id;
+      activateMediaType("video");
+      mediaAssets.video = asset.media_id;
+      resetIntent(true);
       text(
         "media-result",
         asset.filename + " · " + (asset.size / 1048576).toFixed(2) + " MiB is ready."
@@ -400,40 +549,106 @@
     review();
   });
 
-  $("caption").addEventListener("input", updateCaptionCount);
+  $("photo-urls").addEventListener("input", () => {
+    activateMediaType("photo");
+    mediaAssets.photo = null;
+    resetIntent(true);
+    text("photo-result", "");
+    updatePhotoPreparationButton();
+    review();
+  });
+
+  $("photo-cover").addEventListener("input", () => {
+    activateMediaType("photo");
+    mediaAssets.photo = null;
+    resetIntent(true);
+    text("photo-result", "");
+    updatePhotoPreparationButton();
+    review();
+  });
+
+  $("photo-upload").addEventListener("click", async () => {
+    const { urls, cover, error } = photoForm();
+    if (error || photoPreparing || !account.connected || !canPreparePhoto()) return;
+
+    activateMediaType("photo");
+    mediaAssets.photo = null;
+    resetIntent(true);
+    photoPreparing = true;
+    updatePhotoPreparationButton();
+    text("photo-result", translated("photo.preparing", "Preparing photo set…"));
+
+    try {
+      const asset = await api("/api/media/photo", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ photo_images: urls, photo_cover_index: cover })
+      });
+      mediaAssets.photo = asset.media_id;
+      text("photo-result", `${urls.length} photos are ready in your workspace.`);
+    } catch (err) {
+      text("photo-result", err.message);
+    }
+    photoPreparing = false;
+    updatePhotoPreparationButton();
+    review();
+  });
+
+  $("caption").addEventListener("input", () => {
+    activateMediaType("video");
+    updateCaptionCount();
+    resetIntent(true);
+    review();
+  });
+  $("photo-caption").addEventListener("input", () => {
+    activateMediaType("photo");
+    updatePhotoCaptionCount();
+    resetIntent(true);
+    review();
+  });
 
   for (const id of ["mode-draft", "mode-direct", "privacy", "consent",
-                    "own-brand", "paid-brand", "ai-content"]) {
+                    "own-brand", "paid-brand", "ai-content",
+                    "photo-mode-draft", "photo-mode-direct", "photo-privacy",
+                    "photo-disable-comment", "photo-own-brand", "photo-paid-brand", "photo-ai-content"]) {
     const el = $(id);
     if (el) {
       el.addEventListener("change", () => {
-        if (id.startsWith("mode")) idempotencyKey = null;
+        if (id === "consent") {
+          review();
+          return;
+        }
+        activateMediaType(id.startsWith("photo-") ? "photo" : "video");
+        resetIntent(true);
         review();
       });
     }
   }
 
   $("publish").addEventListener("click", async () => {
-    if (sending || !mediaId || !$("consent").checked) return;
+    const selectedMediaId = activeMediaId();
+    if (sending || !selectedMediaId || !$("consent").checked) return;
     if (!idempotencyKey) idempotencyKey = crypto.randomUUID();
 
     sending = true;
     review();
-    report("Sending your confirmed request to TikTok…");
+    report("Queueing your confirmed request securely…");
 
+    const isPhoto = activeMediaType === "photo";
     const payload = {
-      media_id: mediaId,
+      media_id: selectedMediaId,
+      media_type: activeMediaType,
       mode: mode(),
       idempotency_key: idempotencyKey,
-      caption: $("caption").value,
+      caption: $(isPhoto ? "photo-caption" : "caption").value,
       consent: true,
-      privacy: mode() === "direct" ? $("privacy").value : null,
-      disable_comment: $("disable-comment").checked,
-      disable_duet: $("disable-duet").checked,
-      disable_stitch: $("disable-stitch").checked,
-      brand_organic_toggle: $("own-brand").checked,
-      brand_content_toggle: $("paid-brand").checked,
-      is_aigc: $("ai-content").checked
+      privacy: mode() === "direct" ? privacySelect().value : null,
+      disable_comment: $(isPhoto ? "photo-disable-comment" : "disable-comment").checked,
+      disable_duet: isPhoto ? false : $("disable-duet").checked,
+      disable_stitch: isPhoto ? false : $("disable-stitch").checked,
+      brand_organic_toggle: $(isPhoto ? "photo-own-brand" : "own-brand").checked,
+      brand_content_toggle: $(isPhoto ? "photo-paid-brand" : "paid-brand").checked,
+      is_aigc: $(isPhoto ? "photo-ai-content" : "ai-content").checked
     };
 
     try {
@@ -451,12 +666,20 @@
           (job.idempotent_replay ? " (same request, not duplicated)" : "")
       );
     } catch (err) {
-      report(
-        "Request not confirmed: " +
-          err.message +
-          ". If the result is uncertain, retry with the same request key or contact support.",
-        true
-      );
+      if (typeof err.detail?.job_id === "string" && err.detail.job_id) {
+        jobId = err.detail.job_id;
+        $("refresh-status").disabled = false;
+        const status = err.detail.job_status || "REQUEST_UNCERTAIN";
+        const reason = err.detail.fail_reason || err.message;
+        report(status + " · " + reason + " Refresh this saved job before trying again.", true);
+      } else {
+        report(
+          "Request not confirmed: " +
+            err.message +
+            ". Keep this page open and retry with the same request key; check TikTok status before starting a new request.",
+          true
+        );
+      }
     }
     sending = false;
     review();

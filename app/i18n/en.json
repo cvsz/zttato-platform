@@ -55,14 +55,19 @@
       "content_disclosure": "Content disclosure",
       "own_brand": "This video promotes my own business",
       "paid_brand": "This video is a paid partnership",
-      "ai_content": "This video contains AI-generated content"
+      "ai_content": "This video contains AI-generated content",
+      "drop_title": "Drop an MP4 here or click to browse",
+      "drop_help": "Only MP4 · maximum 64 MiB · never upload sensitive content",
+      "draft_help": "Upload a draft and finish editing and posting from your TikTok inbox.",
+      "direct_help": "TikTok processes a direct post after you confirm and applies account and API restrictions."
     },
     "photo": {
       "title": "2b · Prepare photos (Photo Post)",
-      "note": "Upload up to 35 photos via HTTPS URLs. Each photo must be accessible without authentication.",
+      "note": "Use up to 35 publicly accessible photo URLs from a TikTok-verified HTTPS domain or URL prefix.",
       "urls_label": "Photo URLs (one per line, max 35, HTTPS only)",
       "urls_placeholder": "https://example.com/photo1.jpg\nhttps://example.com/photo2.jpg",
-      "photo_help": "JPEG/WebP supported. Max 35 photos. URLs must be publicly accessible and use HTTPS.",
+      "photo_help": "JPEG/WebP only · max 20 MB and 1080p per image · no login or redirects. TikTok must verify the domain or URL prefix.",
+      "url_property_missing": "Photo Post is disabled until TikTok verifies and configures a media URL prefix.",
       "upload_button": "Prepare photo set",
       "caption_label": "Caption (maximum 4,000 characters for photos)",
       "caption_placeholder": "Write your caption here",
@@ -77,9 +82,9 @@
       "photo_disable_duet": "Disable Duet",
       "photo_disable_stitch": "Disable Stitch",
       "photo_disclosure": "Content disclosure",
-      "photo_own_brand": "This video promotes my own business",
-      "photo_paid_brand": "This video is a paid partnership",
-      "photo_ai_content": "This video contains AI-generated content"
+      "photo_own_brand": "This photo post promotes my own business",
+      "photo_paid_brand": "This photo post is a paid partnership",
+      "photo_ai_content": "This photo set contains AI-generated content"
     },
     "review": {
       "title": "3 · Review and confirm",
@@ -94,7 +99,9 @@
       "publish_button": "Send to TikTok",
       "note": "Draft: finish posting from TikTok inbox. Direct: TikTok processes the post and applies account/API restrictions.",
       "status": "No content sent.",
-      "refresh": "Refresh TikTok status"
+      "refresh": "Refresh TikTok status",
+      "draft": "Draft",
+      "direct": "Direct Post"
     },
     "account": {
       "title": "Account controls",
@@ -241,6 +248,8 @@
     "error_max": "Maximum 35 photos allowed.",
     "error_https": "All URLs must use HTTPS.",
     "error_cover": "Cover index must be a valid integer.",
+    "error_url": "Enter a valid HTTPS photo URL without spaces, credentials, fragments or redirects.",
+    "error_format": "TikTok Photo Post supports JPEG and WebP image URLs only.",
     "error_caption": "Caption exceeds 4000 characters."
   },
   "publish": {

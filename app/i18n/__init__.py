@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 
-I18N_DIR = Path(__file__).parent / "i18n"
+I18N_DIR = Path(__file__).parent
 DEFAULT_LOCALE = "en"
 SUPPORTED_LOCALES = ["en", "th", "zh", "ja", "ko", "vi"]
 

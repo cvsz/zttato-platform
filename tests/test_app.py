@@ -8,8 +8,9 @@ import httpx
 from cryptography.fernet import Fernet
 
 from fastapi.testclient import TestClient
+from sqlalchemy import inspect
 
-from app.config import Settings
+from app.config import Settings, load_settings
 from app.db import LinkedAccount, make_session_factory
 from app.main import create_app, safe_avatar_url
 from app.security import digest
@@ -31,6 +32,23 @@ def settings(tmp_path: Path) -> Settings:
         legal_address="Example Address",
         media_dir=str(tmp_path / "media"),
         max_video_bytes=1024 * 1024,
+    )
+
+
+def production_settings(tmp_path: Path) -> Settings:
+    return replace(
+        settings(tmp_path),
+        env="production",
+        base_url="https://zttato.zeaz.dev",
+        allowed_hosts=("zttato.zeaz.dev",),
+        database_url="postgresql+psycopg://synthetic:synthetic@db:5432/zttato",
+        encryption_key=Fernet.generate_key().decode(),
+        client_key="synthetic-client-key",
+        client_secret="synthetic-client-secret",
+        legal_entity="ZTTato Operator Group",
+        legal_email="support@zttato.zeaz.dev",
+        legal_address="1 Service Road, Bangkok 10110, Thailand",
+        metrics_bearer_token="synthetic-metrics-bearer-token-123456789",
     )
 
 
@@ -94,10 +112,58 @@ def test_readiness_uses_database(tmp_path):
     assert client.get("/health/ready").json() == {"status": "ready"}
 
 
-def test_production_readiness_fails_without_migration(tmp_path):
-    app = create_app(replace(settings(tmp_path), env="production"))
+def test_production_readiness_fails_without_migration(tmp_path, monkeypatch):
+    engine, factory = make_session_factory("sqlite:///" + str(tmp_path / "production-no-migration.db"))
+    monkeypatch.setattr("app.main.make_session_factory", lambda *_args, **_kwargs: (engine, factory))
+    app = create_app(production_settings(tmp_path))
+    response = TestClient(app).get("/health/ready", headers={"host": "zttato.zeaz.dev"})
+    assert response.status_code == 503
+    engine.dispose()
+
+
+def test_staging_disables_schema_bootstrap_and_fails_readiness_without_migration(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.main.validate_deployment_config", lambda _settings: None)
+    conf = replace(settings(tmp_path), env="staging")
+    app = create_app(conf)
+    assert inspect(app.state.engine).get_table_names() == []
     response = TestClient(app).get("/health/ready")
     assert response.status_code == 503
+    app.state.engine.dispose()
+
+
+def test_production_rejects_wildcard_hosts_and_missing_metrics_secret(tmp_path):
+    for invalid in (
+        replace(production_settings(tmp_path), allowed_hosts=("*",)),
+        replace(production_settings(tmp_path), metrics_bearer_token=""),
+    ):
+        try:
+            create_app(invalid)
+        except ValueError:
+            continue
+        raise AssertionError("unsafe production settings must fail closed")
+
+
+def test_production_rejects_placeholder_legal_data_and_unsupported_scope(tmp_path):
+    for invalid in (
+        replace(production_settings(tmp_path), legal_entity="Legal operator details pending"),
+        replace(production_settings(tmp_path), scopes=("user.info.basic", "user.info.stats")),
+        replace(production_settings(tmp_path), database_url="mysql://user:pass@db/zttato"),
+    ):
+        try:
+            create_app(invalid)
+        except ValueError:
+            continue
+        raise AssertionError("unsupported production settings must fail closed")
+
+
+def test_unknown_app_environment_fails_closed(monkeypatch):
+    monkeypatch.setenv("APP_ENV", "prod")
+    try:
+        load_settings()
+    except ValueError as exc:
+        assert "APP_ENV" in str(exc)
+    else:
+        raise AssertionError("unknown APP_ENV must fail closed")
 
 
 def test_production_rejects_host_mismatch(tmp_path):
@@ -145,9 +211,9 @@ def test_profile_requires_authenticated_session_and_authorized_scope(tmp_path):
     assert client.get("/api/profile").status_code == 401
 
 
-def connected_profile_client(tmp_path, scopes="user.info.basic,video.upload"):
+def connected_profile_client(tmp_path, scopes="user.info.basic,video.upload", configuration=None):
     key = Fernet.generate_key().decode()
-    conf = replace(settings(tmp_path), encryption_key=key)
+    conf = replace(configuration or settings(tmp_path), encryption_key=key)
     app = create_app(conf)
     client = TestClient(app)
     assert client.get("/api/session").status_code == 200

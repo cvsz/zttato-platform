@@ -1,6 +1,28 @@
 import os
 from dataclasses import dataclass
-from urllib.parse import urlparse
+import ipaddress
+from urllib.parse import unquote, urlparse
+
+APP_ENVIRONMENTS = frozenset({"development", "test", "sandbox", "staging", "production"})
+SUPPORTED_TIKTOK_SCOPES = frozenset({"user.info.basic", "video.upload", "video.publish"})
+
+
+def _decoded_path(path: str) -> str:
+    decoded = path
+    for _ in range(8):
+        unquoted = unquote(decoded)
+        if unquoted == decoded:
+            return decoded
+        decoded = unquoted
+    raise ValueError("URL path uses excessive percent encoding")
+
+
+def _has_unsafe_path_segments(path: str) -> bool:
+    try:
+        decoded = _decoded_path(path)
+    except ValueError:
+        return True
+    return "\\" in decoded or any(segment in {".", ".."} for segment in decoded.split("/"))
 
 
 @dataclass(frozen=True)
@@ -27,7 +49,9 @@ class Settings:
     media_retention_days: int = 30
     record_retention_days: int = 90
     cleanup_interval_seconds: int = 3600
+    publish_worker_interval_seconds: int = 2
     metrics_bearer_token: str = ""
+    tiktok_verified_media_url_prefixes: tuple[str, ...] = ()
 
     @property
     def redirect_uri(self) -> str:
@@ -51,6 +75,135 @@ def validate_host_config(s: Settings) -> None:
         raise ValueError("APP_ALLOWED_HOSTS must contain hostnames only")
     if base_host not in normalized_hosts and "*" not in normalized_hosts:
         raise ValueError("APP_ALLOWED_HOSTS must include the APP_BASE_URL hostname")
+
+
+def _is_placeholder(value: str) -> bool:
+    normalized = value.strip().lower()
+    if not normalized or normalized.startswith("replace_"):
+        return True
+    return normalized in {
+        "legal operator details pending",
+        "contact details pending",
+        "address pending legal review",
+        "example operator",
+        "example address",
+        "pending",
+    }
+
+
+def validate_deployment_config(s: Settings) -> None:
+    """Fail closed on incomplete, placeholder or overbroad deployment settings."""
+    if s.env not in APP_ENVIRONMENTS:
+        raise ValueError("APP_ENV must be development, test, sandbox, staging, or production")
+    validate_host_config(s)
+    validate_tiktok_media_url_prefixes(s)
+    validate_zwallet_config(s)
+
+    if not s.scopes or len(s.scopes) != len(set(s.scopes)):
+        raise ValueError("TIKTOK_SCOPES must contain unique supported scopes")
+    if set(s.scopes) - SUPPORTED_TIKTOK_SCOPES:
+        raise ValueError("TIKTOK_SCOPES includes a capability that this application does not implement")
+    if not 1 <= s.publish_worker_interval_seconds <= 60:
+        raise ValueError("PUBLISH_WORKER_INTERVAL_SECONDS must be between 1 and 60")
+
+    deployment_env = s.env in {"staging", "production"}
+    if deployment_env:
+        if s.env == "production" and "*" in {host.strip().lower() for host in s.allowed_hosts}:
+            raise ValueError("Production APP_ALLOWED_HOSTS must not contain a wildcard")
+        parsed_base = urlparse(s.base_url)
+        if parsed_base.scheme != "https":
+            raise ValueError("Staging and production APP_BASE_URL must use HTTPS")
+        try:
+            base_host = (parsed_base.hostname or "").lower().rstrip(".")
+            loopback = ipaddress.ip_address(base_host).is_loopback
+        except ValueError:
+            loopback = False
+        if loopback or base_host in {"localhost", "example.com", "example.net", "example.org"}:
+            raise ValueError("Staging and production APP_BASE_URL must use a real public hostname")
+
+        database_scheme = urlparse(s.database_url).scheme
+        if database_scheme not in {"postgresql", "postgresql+psycopg", "postgresql+psycopg2"}:
+            raise ValueError("Staging and production require PostgreSQL")
+        if not s.encryption_key or s.encryption_key.startswith("REPLACE_"):
+            raise ValueError("Staging and production require a persistent APP_ENCRYPTION_KEY")
+        if (
+            not s.client_key
+            or not s.client_secret
+            or s.client_key.startswith("REPLACE_")
+            or s.client_secret.startswith("REPLACE_")
+        ):
+            raise ValueError("Staging and production require TikTok client credentials")
+        if any(_is_placeholder(value) for value in (s.legal_entity, s.legal_email, s.legal_address)):
+            raise ValueError("Staging and production require reviewed legal operator details")
+        email_domain = s.legal_email.rsplit("@", 1)[-1].lower() if "@" in s.legal_email else ""
+        if not email_domain or email_domain.endswith((".test", ".example", ".invalid", ".localhost")):
+            raise ValueError("Staging and production require a real legal contact email domain")
+        if s.env == "production" and (
+            len(s.metrics_bearer_token) < 32 or s.metrics_bearer_token.startswith("REPLACE_")
+        ):
+            raise ValueError("Production requires a private metrics bearer token of at least 32 characters")
+
+
+def validate_tiktok_media_url_prefixes(s: Settings) -> None:
+    """Validate URL prefixes configured as TikTok-verified media properties."""
+    for prefix in s.tiktok_verified_media_url_prefixes:
+        try:
+            parsed = urlparse(prefix)
+            host = (parsed.hostname or "").lower().rstrip(".")
+            port = parsed.port
+            ipaddress.ip_address(host)
+            is_ip_address = True
+        except ValueError:
+            try:
+                parsed = urlparse(prefix)
+                host = (parsed.hostname or "").lower().rstrip(".")
+                port = parsed.port
+            except ValueError as exc:
+                raise ValueError("TIKTOK_VERIFIED_MEDIA_URL_PREFIXES contains an invalid URL") from exc
+            is_ip_address = False
+        if (
+            not prefix
+            or prefix != prefix.strip()
+            or any(char.isspace() for char in prefix)
+            or parsed.scheme != "https"
+            or not host
+            or "." not in host
+            or is_ip_address
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+            or port not in (None, 443)
+            or not parsed.path.endswith("/")
+            or _has_unsafe_path_segments(parsed.path)
+        ):
+            raise ValueError(
+                "TikTok verified media URL prefixes must be HTTPS domain prefixes ending in / without credentials, query, or fragment"
+            )
+
+
+def media_url_matches_verified_prefix(url: str, prefixes: tuple[str, ...]) -> bool:
+    """Return whether a TikTok media URL is under a configured verified URL prefix."""
+    try:
+        media = urlparse(url)
+        media_port = media.port or 443
+    except ValueError:
+        return False
+    for prefix in prefixes:
+        try:
+            verified = urlparse(prefix)
+            verified_port = verified.port or 443
+        except ValueError:
+            continue
+        if (
+            media.scheme == "https"
+            and (media.hostname or "").lower().rstrip(".") == (verified.hostname or "").lower().rstrip(".")
+            and media_port == verified_port
+            and not _has_unsafe_path_segments(media.path)
+            and media.path.startswith(verified.path)
+        ):
+            return True
+    return False
 
 
 def validate_zwallet_config(s: Settings) -> None:
@@ -82,14 +235,23 @@ def validate_zwallet_config(s: Settings) -> None:
         return
     if len(service_token) > 8192 or any(ord(char) < 33 or ord(char) > 126 for char in service_token):
         raise ValueError("Z_PLATFORM_SERVICE_TOKEN must contain printable ASCII without spaces")
-    if s.env == "production" and parsed.scheme != "https" and host.lower() not in ("localhost", "127.0.0.1", "::1"):
+    if (
+        s.env in {"staging", "production"}
+        and parsed.scheme != "https"
+        and host.lower()
+        not in (
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        )
+    ):
         raise ValueError("Production ZWallet adapter URLs must use HTTPS")
 
 
 def load_settings() -> Settings:
     get = os.environ.get
     s = Settings(
-        env=get("APP_ENV", "development").lower(),
+        env=get("APP_ENV", "development").strip().lower(),
         base_url=get("APP_BASE_URL", "http://localhost:8000").rstrip("/"),
         allowed_hosts=tuple(x.strip() for x in get("APP_ALLOWED_HOSTS", "localhost,127.0.0.1").split(",") if x.strip()),
         database_url=get("DATABASE_URL", "sqlite:///./data/zttato.db"),
@@ -115,10 +277,13 @@ def load_settings() -> Settings:
         media_retention_days=int(get("MEDIA_RETENTION_DAYS", "30")),
         record_retention_days=int(get("RECORD_RETENTION_DAYS", "90")),
         cleanup_interval_seconds=int(get("CLEANUP_INTERVAL_SECONDS", "3600")),
+        publish_worker_interval_seconds=int(get("PUBLISH_WORKER_INTERVAL_SECONDS", "2")),
         metrics_bearer_token=get("METRICS_BEARER_TOKEN", ""),
+        tiktok_verified_media_url_prefixes=tuple(
+            value.strip() for value in get("TIKTOK_VERIFIED_MEDIA_URL_PREFIXES", "").split(",") if value.strip()
+        ),
     )
-    validate_host_config(s)
-    validate_zwallet_config(s)
+    validate_deployment_config(s)
     if not 1 <= s.max_requests_per_minute <= 10_000:
         raise ValueError("MAX_REQUESTS_PER_MINUTE must be between 1 and 10000")
     if not 1 <= s.max_uploads_per_day <= 10_000:
@@ -131,15 +296,6 @@ def load_settings() -> Settings:
         raise ValueError("CLEANUP_INTERVAL_SECONDS must be between 60 and 86400")
     if len(s.metrics_bearer_token) > 512:
         raise ValueError("METRICS_BEARER_TOKEN must not exceed 512 characters")
-    u = urlparse(s.base_url)
-    if s.env == "production":
-        if u.scheme != "https":
-            raise ValueError("Production APP_BASE_URL must use HTTPS")
-        if "sqlite" in s.database_url or not s.encryption_key or s.encryption_key.startswith("REPLACE_"):
-            raise ValueError("Production requires PostgreSQL and a persistent APP_ENCRYPTION_KEY")
-        required = [s.client_key, s.client_secret, s.legal_entity, s.legal_email, s.legal_address]
-        if any(not x or x.startswith("REPLACE_") for x in required):
-            raise ValueError("Production TikTok and legal operator fields must be configured")
     if s.max_video_bytes < 1024 or s.max_video_bytes > 67108864:
         raise ValueError("MAX_VIDEO_BYTES must be between 1 KiB and 64 MiB")
     return s

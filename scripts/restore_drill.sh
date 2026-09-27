@@ -22,7 +22,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SUFFIX="$(date -u +%Y%m%d%H%M%S)_$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
 SOURCE_DB="zttato_drill_src_${SUFFIX}"
 RESTORE_DB="zttato_drill_dst_${SUFFIX}"
-EXPECTED_MIGRATION_HEAD="20260927_02"
+EXPECTED_MIGRATION_HEAD="20260927_04"
 BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zttato-backup.XXXXXX")"
 ESCROW_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zttato-key-escrow.XXXXXX")"
 chmod 700 "$BACKUP_DIR" "$ESCROW_DIR"
@@ -83,6 +83,7 @@ export DATABASE_URL="$(make_database_url "$SOURCE_DB")"
 
 python3 - <<'PY'
 import json
+import hashlib
 import os
 import time
 import uuid
@@ -133,6 +134,10 @@ with factory() as session:
             mode="draft",
             publish_id="synthetic-publish-id",
             status="RECONCILIATION_REQUIRED",
+            request_fingerprint=hashlib.sha256(b"synthetic-restore-drill-request").hexdigest(),
+            consented_at=now,
+            consent_version="publish-consent-v1",
+            request_cipher=cipher.encrypt(json.dumps({"caption": "synthetic restore-drill caption"})),
             checked_at=0,
             created_at=now,
         )
@@ -183,6 +188,11 @@ with factory() as session:
     assert account is not None
     assert cipher.decrypt(account.access_cipher) == expected["access"]
     assert cipher.decrypt(account.refresh_cipher) == expected["refresh"]
+    job = session.scalar(select(PublishJob))
+    assert job is not None
+    assert len(job.request_fingerprint) == 64
+    assert job.consented_at is not None and job.consent_version == "publish-consent-v1"
+    assert cipher.decrypt(job.request_cipher) == '{"caption": "synthetic restore-drill caption"}'
     assert rows == {"sessions": 1, "oauth": 1, "accounts": 1, "media": 1, "jobs": 1}
 assert key not in Path(os.environ["BACKUP_PATH_INTERNAL"]).read_bytes()
 engine.dispose()

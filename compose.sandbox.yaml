@@ -1,0 +1,39 @@
+services:
+  db:
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-zttato_sandbox}
+      POSTGRES_USER: ${POSTGRES_USER:-zttato_sandbox}
+    ports: !override
+      - "127.0.0.1:55432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zttato_sandbox} -d ${POSTGRES_DB:-zttato_sandbox}"]
+
+  migrate:
+    environment:
+      APP_ENV: sandbox
+
+  app:
+    environment:
+      APP_ENV: sandbox
+      APP_BASE_URL: http://localhost:8001
+      APP_ALLOWED_HOSTS: localhost,127.0.0.1
+      TIKTOK_CLIENT_KEY: ""
+      TIKTOK_CLIENT_SECRET: ""
+      TIKTOK_APP_AUDITED: "false"
+      ZWALLET_ADAPTER_URL: ""
+      Z_PLATFORM_SERVICE_TOKEN: ""
+    ports: !override
+      - "127.0.0.1:8001:8000"
+    volumes: !override
+      - sandbox_media:/srv/media
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; req = urllib.request.Request('http://127.0.0.1:8000/health/live', headers={'Host': 'localhost'}); urllib.request.urlopen(req, timeout=3)",
+        ]
+
+volumes:
+  sandbox_media:

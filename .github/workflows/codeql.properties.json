@@ -1,6 +1,6 @@
 {
-  "name": "ZeaZDev CodeQL",
-  "description": "Code scanning baseline for JavaScript/TypeScript and Python. Adjust the language matrix to match the repository.",
+  "name": "zTTato CodeQL",
+  "description": "CodeQL analysis for GitHub Actions, JavaScript/TypeScript, and Python with a stable required-check aggregator.",
   "iconName": "octicon shield-lock",
   "categories": ["Code scanning"]
 }

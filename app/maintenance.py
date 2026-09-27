@@ -4,7 +4,7 @@ import logging
 import time
 from pathlib import Path
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import sessionmaker
 
 from app.db import BrowserSession, LinkedAccount, MediaAsset, OAuthRequest, PublishJob, QuotaBucket
@@ -15,6 +15,7 @@ _CLEANUP_LOCK_ID = 7_415_027_092
 _TERMINAL_JOB_STATES = frozenset(
     {"FAILED", "INITIATION_FAILED", "PUBLISH_COMPLETE", "COMPLETE", "COMPLETED", "CANCELLED", "CANCELED"}
 )
+_STALE_PUBLISH_AFTER_SECONDS = 15 * 60
 
 
 def _local_upload_path(media_dir: str | Path, stored_path: str) -> Path | None:
@@ -43,6 +44,52 @@ def remove_local_upload(media_dir: str | Path, stored_path: str) -> bool:
     return True
 
 
+def _mark_stale_publish_jobs(session, timestamp: int) -> dict[str, int]:
+    stale_before = timestamp - _STALE_PUBLISH_AFTER_SECONDS
+    uncertain = (
+        session.execute(
+            update(PublishJob)
+            .where(
+                PublishJob.status == "INITIATING",
+                func.coalesce(PublishJob.updated_at, PublishJob.created_at) <= stale_before,
+            )
+            .values(
+                status="INITIATION_UNCERTAIN",
+                fail_reason="Provider initiation was interrupted; check provider status before retrying.",
+                updated_at=timestamp,
+                request_cipher=None,
+            )
+        ).rowcount
+        or 0
+    )
+    reconciliation = (
+        session.execute(
+            update(PublishJob)
+            .where(
+                PublishJob.status == "TRANSFER_PENDING",
+                PublishJob.publish_id.is_not(None),
+                func.coalesce(PublishJob.updated_at, PublishJob.created_at) <= stale_before,
+            )
+            .values(
+                status="RECONCILIATION_REQUIRED",
+                fail_reason="Media transfer completion is uncertain; refresh provider status before retrying.",
+                updated_at=timestamp,
+            )
+        ).rowcount
+        or 0
+    )
+    return {"jobs_marked_uncertain": uncertain, "jobs_marked_reconciliation": reconciliation}
+
+
+def recover_stale_publish_jobs(session_factory: sessionmaker, *, now: int | None = None) -> dict[str, int]:
+    """Mark abandoned publish work explicitly without repeating an external operation."""
+    timestamp = int(time.time()) if now is None else now
+    with session_factory() as session:
+        result = _mark_stale_publish_jobs(session, timestamp)
+        session.commit()
+    return result
+
+
 def run_cleanup(
     session_factory: sessionmaker,
     media_dir: str | Path,
@@ -62,6 +109,9 @@ def run_cleanup(
         "linked_accounts": 0,
         "media_assets": 0,
         "publish_jobs": 0,
+        "jobs_marked_uncertain": 0,
+        "jobs_marked_reconciliation": 0,
+        "sessions_deferred_for_publish": 0,
         "quota_buckets": 0,
         "file_delete_failures": 0,
     }
@@ -77,10 +127,26 @@ def run_cleanup(
         expired_oauth = session.execute(delete(OAuthRequest).where(OAuthRequest.expires_at <= timestamp)).rowcount or 0
         result["oauth_requests"] = expired_oauth
 
+        stale_jobs = _mark_stale_publish_jobs(session, timestamp)
+        result.update(stale_jobs)
+
         expired_sessions = session.scalars(select(BrowserSession).where(BrowserSession.expires_at <= timestamp)).all()
         expired_ids = {row.id for row in expired_sessions}
         blocked_expired_ids: set[str] = set()
         for expired in expired_sessions:
+            outstanding_job = session.scalar(
+                select(PublishJob.id)
+                .where(
+                    PublishJob.session_id == expired.id,
+                    PublishJob.status.not_in(_TERMINAL_JOB_STATES),
+                    func.coalesce(PublishJob.updated_at, PublishJob.created_at) > record_cutoff,
+                )
+                .limit(1)
+            )
+            if outstanding_job:
+                blocked_expired_ids.add(expired.id)
+                result["sessions_deferred_for_publish"] = int(result["sessions_deferred_for_publish"]) + 1
+                continue
             assets = session.scalars(select(MediaAsset).where(MediaAsset.session_id == expired.id)).all()
             deleted_all_files = True
             for asset in assets:
@@ -139,11 +205,11 @@ def run_cleanup(
 
     if result["file_delete_failures"]:
         LOGGER.error("retention_cleanup_file_delete_failed count=%d", result["file_delete_failures"])
+    # Keep OAuth cleanup totals in internal metrics, outside general application logs.
     LOGGER.info(
-        "retention_cleanup_complete sessions=%d accounts=%d oauth=%d media=%d jobs=%d quotas=%d",
+        "retention_cleanup_complete sessions=%d accounts=%d media=%d jobs=%d quotas=%d",
         result["sessions"],
         result["linked_accounts"],
-        result["oauth_requests"],
         result["media_assets"],
         result["publish_jobs"],
         result["quota_buckets"],

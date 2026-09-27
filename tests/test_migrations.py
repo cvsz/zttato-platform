@@ -33,6 +33,12 @@ def test_versioned_fresh_migration(tmp_path, monkeypatch):
     ) <= set(inspector.get_table_names())
     assert "duration_ms" in {column["name"] for column in inspector.get_columns("media_assets")}
     assert "updated_at" in {column["name"] for column in inspector.get_columns("publish_jobs")}
+    assert {
+        "request_fingerprint",
+        "consented_at",
+        "consent_version",
+        "request_cipher",
+    } <= {column["name"] for column in inspector.get_columns("publish_jobs")}
     with engine.connect() as connection:
         from sqlalchemy import text
 
@@ -69,6 +75,9 @@ def test_upgrade_preserves_existing_alembic_data(tmp_path, monkeypatch):
             connection.scalar(text("SELECT COUNT(*) FROM media_assets WHERE id = 'media' AND duration_ms IS NULL")) == 1
         )
         assert connection.scalar(text("SELECT updated_at FROM publish_jobs WHERE id = 'job'")) == 1700000000
+        assert connection.scalar(text("SELECT request_fingerprint FROM publish_jobs WHERE id = 'job'")) is None
+        assert connection.scalar(text("SELECT consented_at FROM publish_jobs WHERE id = 'job'")) is None
+        assert connection.scalar(text("SELECT request_cipher FROM publish_jobs WHERE id = 'job'")) is None
     engine.dispose()
 
 

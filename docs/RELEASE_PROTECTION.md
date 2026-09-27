@@ -6,6 +6,8 @@ This document defines the repository-controlled release protection baseline and 
 
 Repository workflows can prove CI/security checks, container vulnerability scanning, SBOM generation, and source-bundle provenance. They cannot prove that GitHub branch/ruleset administration is enabled. Check GitHub's repository settings separately and record that evidence.
 
+The `Analyze Python and Actions` status is emitted by an aggregator that fails unless every CodeQL language job succeeds. The CodeQL matrix separately analyzes GitHub Actions workflows, JavaScript/TypeScript, and Python.
+
 ## Required main-branch policy
 
 Target: `main`.
@@ -23,7 +25,7 @@ Required behavior:
   - `repository-baseline`;
   - `container`;
   - `postgres-schema`;
-  - `Analyze Python and Actions`;
+  - `Analyze Python and Actions` (stable aggregator for the CodeQL matrix);
   - `dependency-review`;
   - `Container security and SBOM`.
 - require at least one independent approving review when an authorized second reviewer exists. A repository owner cannot count their own approval as independent review; do not mark the review gate PASS without real reviewer evidence.

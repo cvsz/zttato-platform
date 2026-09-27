@@ -3,13 +3,13 @@ services:
   db:
     image: postgres:17-alpine
     environment:
-      POSTGRES_DB: zttato
-      POSTGRES_USER: zttato
+      POSTGRES_DB: ${POSTGRES_DB:-zttato}
+      POSTGRES_USER: ${POSTGRES_USER:-zttato}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL","pg_isready -U zttato -d zttato"]
+      test: ["CMD-SHELL","pg_isready -U ${POSTGRES_USER:-zttato} -d ${POSTGRES_DB:-zttato}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -17,10 +17,9 @@ services:
     networks: [internal]
   migrate:
     build: .
-    env_file: .env
     environment:
-      APP_ENV: production
-      DATABASE_URL: postgresql+psycopg://zttato:${POSTGRES_PASSWORD}@db:5432/zttato
+      APP_ENV: ${APP_ENV:-production}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-zttato}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-zttato}
     command: ["alembic", "upgrade", "head"]
     depends_on:
       db:
@@ -33,9 +32,12 @@ services:
     networks: [internal]
   app:
     build: .
-    env_file: .env
+    # The host CIFS mount maps zttato-media to UID/GID 1000:1000.
+    user: "1000:1000"
+    env_file:
+      - ${ZTTATO_ENV_FILE:-.env}
     environment:
-      DATABASE_URL: postgresql+psycopg://zttato:${POSTGRES_PASSWORD}@db:5432/zttato
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-zttato}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-zttato}
       MEDIA_DIR: /srv/media
     depends_on:
       db:
@@ -45,7 +47,12 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
-      - media_data:/srv/media
+      # Fail closed if the external media mount is unavailable; never create a local fallback.
+      - type: bind
+        source: /mnt/zeaz-data/zttato-media
+        target: /srv/media
+        bind:
+          create_host_path: false
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]

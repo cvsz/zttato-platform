@@ -21,6 +21,15 @@ groups:
           summary: zTTato is returning more than one 429 response per second
           description: Separate application quota rejections from TikTok upstream limits before changing thresholds.
 
+      - alert: ZttatoPublishQueueBacklog
+        expr: zttato_publish_queue_oldest_age_seconds > 900
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: A consented publish request has waited in the queue for more than fifteen minutes
+          description: Check worker health, current schema revision, and provider availability; do not replay with a new key.
+
       - alert: ZttatoOAuthFailures
         expr: sum(increase(zttato_oauth_failures_total[15m])) > 5
         for: 5m

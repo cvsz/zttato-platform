@@ -1,6 +1,0 @@
-{
-  "name": "ZeaZDev Release Attestation Baseline",
-  "description": "Artifact-agnostic release supply-chain template. Add deterministic build, SBOM generation, and attestation for the exact released artifact.",
-  "iconName": "octicon verified",
-  "categories": ["Deployment"]
-}

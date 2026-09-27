@@ -1,6 +1,6 @@
 # Schema migration runbook
 
-Versioned schema migration is required for production. Database initialization by SQLAlchemy `create_all()` is **disabled** when `APP_ENV=production`.
+Versioned schema migration is required for staging and production. The current migration head is `20260927_04`. Database initialization by SQLAlchemy `create_all()` is **disabled** when `APP_ENV=staging` or `APP_ENV=production`.
 
 ## Fresh installation
 1. Make an off-host PostgreSQL backup and preserve the encryption key separately.
@@ -16,4 +16,6 @@ Versioned schema migration is required for production. Database initialization b
 Schema downgrades are for isolated rehearsal only. Before production rollback, confirm old application schema compatibility, preserve a verified database backup, and use an operator-approved migration path. Never automatically downgrade a live database.
 
 ## CI
-`python -m pytest tests/test_migrations.py` verifies fresh upgrade and downgrade on an isolated temporary SQLite database. PostgreSQL migration/restore must be independently rehearsed before the production gate is satisfied.
+`python -m pytest tests/test_migrations.py` verifies fresh upgrade/downgrade and legacy-row preservation on an isolated temporary SQLite database. Use the isolated Compose profile for local PostgreSQL 17 rehearsal. PostgreSQL migration/restore must be independently rehearsed against an isolated staging service before the production gate is satisfied.
+
+Publish jobs keep a nullable HMAC request fingerprint, consent version/timestamp, and Fernet-encrypted request data while queued. Existing rows stay nullable after upgrade. Legacy idempotency keys without fingerprints fail with HTTP 409 on another publish request because the original selected caption/options cannot be proven equal; their status remains available through the session-owned job endpoint. The API returns HTTP 202 after the durable queue row commits. Workers claim jobs with row locking; interrupted operations become explicit uncertain states and are never automatically resubmitted.

@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        python: ['3.12','3.13']
+        python: ['3.12', '3.13', '3.14']
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
@@ -35,7 +35,7 @@ jobs:
       - name: Dashboard syntax and runtime regression
         run: |
           node --check web/dashboard.js
-          node --test tests/dashboard.test.mjs
+          node --test tests/dashboard.test.mjs tests/i18n_frontend.test.mjs
       - name: Required files and no tracked secret files
         shell: bash
         run: |
@@ -53,6 +53,17 @@ jobs:
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:18000/health/live && exit 0; sleep 1; done
           docker logs zttato-ci
           exit 1
+      - name: Ensure OAuth callback query values never enter container logs
+        shell: bash
+        run: |
+          set -euo pipefail
+          status="$(curl -sS -o /dev/null -w '%{http_code}' \
+            'http://127.0.0.1:18000/tiktok/callback?code=access-log-canary&state=oauth-state-canary')"
+          [[ "$status" == "401" ]]
+          if docker logs zttato-ci 2>&1 | grep -Eq 'access-log-canary|oauth-state-canary'; then
+            echo "OAuth callback query canary appeared in application logs." >&2
+            exit 1
+          fi
   postgres-schema:
     runs-on: ubuntu-latest
     timeout-minutes: 20

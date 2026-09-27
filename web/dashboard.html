@@ -16,7 +16,7 @@
     <header class="nav">
       <a class="brand" href="/">
         <img src="/assets/icon.svg" alt="" width="42" height="42">
-        zTTato Creator
+        <span data-i18n="app.name">zTTato Creator</span>
       </a>
       <nav>
         <a href="/" data-i18n="nav.home">Home</a>
@@ -25,7 +25,7 @@
         <a href="/terms-of-service" data-i18n="nav.terms">Terms</a>
       </nav>
       <div class="lang-selector">
-        <select id="lang-select" aria-label="Select language">
+        <select class="lang-select" id="lang-select" aria-label="Select language">
           <option value="en">English</option>
           <option value="th">ไทย</option>
           <option value="zh">中文</option>
@@ -165,14 +165,17 @@
         <!-- 2b. Prepare photos (Photo Post) -->
         <section class="panel">
           <h2 data-i18n="dashboard.photo.title">2b · Prepare photos (Photo Post)</h2>
-          <p class="note" data-i18n="dashboard.photo.note">Upload up to 35 photos via HTTPS URLs. Each photo must be accessible without authentication.</p>
+          <p class="note" data-i18n="dashboard.photo.note">Use up to 35 publicly accessible photos from a TikTok-verified HTTPS domain or URL prefix.</p>
           <label for="photo-urls" data-i18n="dashboard.photo.urls_label">Photo URLs (one per line, max 35, HTTPS only)</label>
           <textarea id="photo-urls" rows="5" placeholder="https://example.com/photo1.jpg&#10;https://example.com/photo2.jpg" aria-describedby="photo-help" data-i18n-placeholder="dashboard.photo.urls_placeholder"></textarea>
-          <p id="photo-help" class="note" data-i18n="dashboard.photo.photo_help">JPEG/WebP supported. Max 35 photos. URLs must be publicly accessible and use HTTPS.</p>
+          <p id="photo-help" class="note" data-i18n="dashboard.photo.photo_help">JPEG/WebP only · 20 MB and 1080p maximum per image · no login or redirects. URLs must belong to a verified TikTok URL property.</p>
           <button id="photo-upload" type="button" disabled data-i18n="dashboard.photo.upload_button">Prepare photo set</button>
           <p id="photo-result" role="status" class="note"></p>
           <label for="photo-caption" data-i18n="dashboard.photo.caption_label">Caption (maximum 4,000 characters for photos)</label>
-          <textarea id="photo-caption" maxlength="4000" placeholder="Write your caption here" data-i18n-placeholder="dashboard.photo.caption_placeholder"></textarea>
+          <div class="caption-wrap">
+            <textarea id="photo-caption" maxlength="4000" placeholder="Write your caption here" aria-describedby="photo-caption-count" data-i18n-placeholder="dashboard.photo.caption_placeholder"></textarea>
+            <span id="photo-caption-count" class="char-count">0 / 4000</span>
+          </div>
           <label for="photo-cover" data-i18n="dashboard.photo.cover_label">Cover photo index (0-based)</label>
           <input id="photo-cover" type="number" min="0" max="34" value="0" style="width: 80px;">
           <fieldset>
@@ -197,12 +200,6 @@
               <label class="choice">
                 <input type="checkbox" id="photo-disable-comment"> <span data-i18n="dashboard.photo.photo_disable_comments">Disable comments</span>
               </label>
-              <label class="choice">
-                <input type="checkbox" id="photo-disable-duet"> <span data-i18n="dashboard.photo.photo_disable_duet">Disable Duet</span>
-              </label>
-              <label class="choice">
-                <input type="checkbox" id="photo-disable-stitch"> <span data-i18n="dashboard.photo.photo_disable_stitch">Disable Stitch</span>
-              </label>
             </fieldset>
             <fieldset>
               <legend data-i18n="dashboard.photo.photo_disclosure">Content disclosure</legend>
@@ -212,8 +209,8 @@
               <label class="choice">
                 <input type="checkbox" id="photo-paid-brand"> <span data-i18n="dashboard.photo.photo_paid_brand">This video is a paid partnership</span>
               </label>
-<label class="choice">
-                <input type="checkbox" id="ai-content"> <span data-i18n="dashboard.photo.photo_ai_content">This video contains AI-generated content</span>
+              <label class="choice">
+                <input type="checkbox" id="photo-ai-content"> <span data-i18n="dashboard.photo.photo_ai_content">This photo set contains AI-generated content</span>
               </label>
             </fieldset>
           </div>
