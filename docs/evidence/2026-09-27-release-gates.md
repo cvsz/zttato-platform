@@ -72,4 +72,17 @@ image เดิมไม่รองรับ schema head ใหม่และ�
 - `NOT_TESTED`: public edge OAuth query redaction, Alertmanager receiver/paging, production encryption-key escrow/rotation, legal counsel review, and public workload/load soak.
 - `NOT_TESTED`: live GitHub CI/security checks for this dirty worktree. Code-scanning alert #4 cannot close until the fix is committed/pushed and a new hosted scan runs.
 - `NOT_TESTED`: canonical Affiliate Core and Commerce Sources bounded contexts are not implemented in this Creator-focused application; do not claim the larger platform architecture is complete.
-- User boundary held: no ad-budget, payment, zWallet, TikTok publish, credential rotation, production migration, commit/push, or production deployment occurred.
+- During the restore rehearsal, no ad-budget, payment, zWallet, TikTok publish, credential rotation, production migration, or production deployment occurred. The evidence and sandbox follow-up were later GPG-pushed to `main` in commit `e704e90`.
+
+## Addendum — publish failure and rollback follow-up 2026-09-27 13:53 UTC
+
+| Check | Result | Evidence |
+| --- | --- | --- |
+| Serving Compose publish-job summary | PASS — read-only aggregate | Five `INITIATION_FAILED` rows were present (3 direct, 2 draft); all five had no saved `fail_reason` and no TikTok `publish_id`. No row IDs, session IDs, captions, account data, tokens, or raw provider responses were selected. The old serving image's exception path updates the status and rethrows without saving a failure reason, so the exact historical cause cannot be reconstructed from those records. No retry or provider call was made. |
+| Publish failure guidance | PASS — local synthetic regression | Current source maps only HTTP status classes to fixed guidance and never persists `HTTPException.detail` or raw provider text. The new Draft regression expires the synthetic TikTok authorization, observes a safe reconnect message, restores the fixture account, and explicitly resubmits the same idempotency key; a mock transport sees one inbox init and one upload. |
+| Uncertain request protection | PASS — local synthetic regression | Existing timeout-after-init test remains `INITIATION_UNCERTAIN`; same-key replay does not issue a second provider init. Only `INITIATION_FAILED` without a provider ID can be explicitly re-queued, after media/account/consent checks run again. Legacy rows without a request fingerprint remain fail-closed. |
+| Isolated rollback compatibility | PASS — local only | Built the previous application source at `268d9a7` and ran it on the isolated PostgreSQL 17 database at schema head `20260927_04`; `/health/live` returned `{"status":"ok"}` and `/health/ready` returned `{"status":"ready"}`. This is synthetic schema-compatibility evidence, not a production image rollback. |
+| Updated isolated application | PASS — local only | Rebuilt/restarted only `zttato-sandbox-app-1`; readiness returned `{"status":"ready"}`, Alembic reported `20260927_04 (head)`, and sandbox ports remained loopback-only on 8001/55432. |
+| Serving runtime | NOT CHANGED | The app still runs image `sha256:499938cc484581d4a351bf3f6ad0935d1f9c6874096f43ecdf0b475c54e4a6e5` against migration `20260924_01`. No serving runtime restart or database migration was performed. |
+
+The status display supplied by the user corresponds to the old serving code, which does not persist the failure cause. The current branch now reports safe failure guidance and permits a user-confirmed retry on the same job only for a confirmed initiation failure. Exact diagnosis of the earlier attempt is unavailable; it must not be replayed because the old status and missing provider ID do not prove that TikTok did not accept it.

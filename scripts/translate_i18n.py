@@ -240,20 +240,21 @@ def main() -> None:
     parser.add_argument("--model", type=str, default=MODEL, help=f"Gemini model (default: {MODEL})")
     args = parser.parse_args()
 
-    # Load env
-    env_ai = Path.home() / ".env.ai"
-    if env_ai.exists():
-        for line in env_ai.read_text().splitlines():
-            line = line.strip()
-            if line and not line.startswith("#") and "=" in line:
-                k, _, v = line.partition("=")
-                os.environ.setdefault(k.strip(), v.strip())
+    api_key = ""
+    if not args.dry_run:
+        # Load credentials only when an API request will be made.
+        env_ai = Path.home() / ".env.ai"
+        if env_ai.exists():
+            for line in env_ai.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#") and "=" in line:
+                    k, _, v = line.partition("=")
+                    os.environ.setdefault(k.strip(), v.strip())
 
-    api_key = os.environ.get(API_KEY_ENV, "").strip().strip('"')
-    if not api_key:
-        print(f"ERROR: {API_KEY_ENV} not found in environment or ~/.env.ai")
-        sys.exit(1)
-    print(f"  Using {API_KEY_ENV}: {api_key[:16]}…")
+        api_key = os.environ.get(API_KEY_ENV, "").strip().strip('"')
+        if not api_key:
+            print("ERROR: Translation API credentials are not configured.")
+            sys.exit(1)
 
     # Load English source
     en_file = I18N_DIR / "en.json"

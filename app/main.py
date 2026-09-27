@@ -218,6 +218,34 @@ def _publish_request_fingerprint(payload: PublishInput, settings: Settings) -> s
     return hmac.new(key, serialized.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def _safe_publish_failure_reason(exc: Exception, *, provider_init_started: bool) -> str:
+    """Return actionable failure guidance without persisting provider or user supplied text."""
+    status_code = exc.status_code if isinstance(exc, HTTPException) else None
+    if status_code == 401:
+        return "TikTok authorization expired or unavailable; reconnect the account, then check this job before resubmitting."
+    if status_code == 403:
+        return "TikTok authorization is missing a required permission; reconnect with the requested scope before resubmitting."
+    if status_code == 404:
+        return (
+            "The uploaded video or connected account is unavailable; restore it and check this job before resubmitting."
+        )
+    if status_code == 413:
+        return "The uploaded video exceeds the configured size limit; choose a smaller file before resubmitting."
+    if status_code == 415:
+        return "The uploaded file is not a supported MP4; choose a valid MP4 before resubmitting."
+    if status_code == 422:
+        return "TikTok rejected the video duration or publish settings; review them and check this job before resubmitting."
+    if status_code == 429:
+        return "TikTok or the application rate limit was reached; wait, check this job, then resubmit if needed."
+    if status_code is not None and status_code < 500:
+        return f"Publish request was rejected with HTTP {status_code}; review the account and settings before resubmitting."
+    if not provider_init_started and status_code is not None:
+        return f"Publish preflight failed with HTTP {status_code} before TikTok initialization; refresh job status before resubmitting."
+    if not provider_init_started:
+        return "Publish preflight failed before TikTok publish initialization; check the account, video, and job status before resubmitting."
+    return "TikTok did not confirm request acceptance. Keep the same request key and check job status before retrying."
+
+
 def _increment_quota(
     session: Session,
     *,
@@ -719,9 +747,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 reason = "TikTok returned a publish ID, but transfer completion is uncertain. Refresh status before retrying."
             elif not provider_init_started or isinstance(exc, HTTPException) and exc.status_code < 500:
                 status = "INITIATION_FAILED"
-                reason = (
-                    "Publish preflight failed before TikTok accepted an operation. Review status before resubmitting."
-                )
+                reason = _safe_publish_failure_reason(exc, provider_init_started=provider_init_started)
             else:
                 status = "INITIATION_UNCERTAIN"
                 reason = "TikTok did not confirm request acceptance. Keep the same request key and check account status before retrying."
@@ -1216,23 +1242,29 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if payload.mode not in ("draft", "direct"):
             raise HTTPException(422, "Choose draft or direct")
         request_fingerprint = _publish_request_fingerprint(payload, s)
+        retryable_failed_job = None
         earlier = session.scalar(
-            select(PublishJob).where(
-                PublishJob.session_id == row.id, PublishJob.idempotency_key == payload.idempotency_key
-            )
+            select(PublishJob)
+            .where(PublishJob.session_id == row.id, PublishJob.idempotency_key == payload.idempotency_key)
+            .with_for_update()
         )
         if earlier:
             if not earlier.request_fingerprint or not hmac.compare_digest(
                 earlier.request_fingerprint, request_fingerprint
             ):
                 raise HTTPException(409, "Idempotency key already belongs to a different or legacy request")
-            if earlier.status == "QUEUED":
-                background_tasks.add_task(run_queued_publish_job, earlier.id)
-            return {
-                "job_id": earlier.id,
-                "status": earlier.status,
-                "idempotent_replay": True,
-            }
+            if earlier.status == "INITIATION_FAILED" and not earlier.publish_id:
+                # A user-confirmed resubmission may safely reuse this job only when the
+                # provider did not return an ID. Uncertain/accepted jobs remain immutable.
+                retryable_failed_job = earlier
+            else:
+                if earlier.status == "QUEUED":
+                    background_tasks.add_task(run_queued_publish_job, earlier.id)
+                return {
+                    "job_id": earlier.id,
+                    "status": earlier.status,
+                    "idempotent_replay": True,
+                }
         media = session.scalar(
             select(MediaAsset).where(MediaAsset.id == payload.media_id, MediaAsset.session_id == row.id)
         )
@@ -1310,6 +1342,22 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "media_type",
             }
         )
+        if retryable_failed_job:
+            retryable_failed_job.status = "QUEUED"
+            retryable_failed_job.fail_reason = None
+            retryable_failed_job.request_cipher = cipher.encrypt(json.dumps(encrypted_request, ensure_ascii=False))
+            retryable_failed_job.consented_at = int(time.time())
+            retryable_failed_job.consent_version = PUBLISH_CONSENT_VERSION
+            retryable_failed_job.checked_at = 0
+            session.commit()
+            background_tasks.add_task(run_queued_publish_job, retryable_failed_job.id)
+            return {
+                "job_id": retryable_failed_job.id,
+                "status": "QUEUED",
+                "idempotent_replay": True,
+                "retry_queued": True,
+            }
+
         job = PublishJob(
             id=str(uuid.uuid4()),
             session_id=row.id,

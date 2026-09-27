@@ -462,6 +462,73 @@ def test_uncertain_publish_initialization_persists_job_and_replay_does_not_dupli
     ]
 
 
+def test_failed_draft_preflight_explains_auth_issue_and_retries_same_job_after_reconnect(tmp_path):
+    app, client, factory, session_id, _ = _linked_video(tmp_path, duration_ms=5000)
+    with factory() as session:
+        linked = session.scalar(select(LinkedAccount).where(LinkedAccount.session_id == session_id))
+        linked.access_expires_at = int(time.time()) - 10
+        linked.refresh_expires_at = int(time.time()) - 10
+        session.commit()
+
+    provider_calls = []
+
+    async def provider(request):
+        provider_calls.append(request.url.path)
+        if request.url.path == "/v2/post/publish/inbox/video/init/":
+            return httpx.Response(
+                200,
+                json={
+                    "error": {"code": "ok"},
+                    "data": {
+                        "publish_id": "synthetic-publish-id",
+                        "upload_url": "https://open-upload.tiktokapis.com/video/?upload_id=synthetic",
+                    },
+                },
+            )
+        if request.url.path == "/video/":
+            return httpx.Response(201)
+        if request.url.path == "/v2/post/publish/status/fetch/":
+            return httpx.Response(200, json={"error": {"code": "ok"}, "data": {"status": "PROCESSING"}})
+        raise AssertionError(f"unexpected TikTok request: {request.url.path}")
+
+    app.state.tiktok.transport = httpx.MockTransport(provider)
+    payload = {
+        "media_id": "publish-media-fixture",
+        "mode": "draft",
+        "idempotency_key": "expired-draft-auth-key-1",
+        "caption": "synthetic draft retry",
+        "consent": True,
+    }
+    headers = {"x-csrf-token": client.cookies["zttato_csrf"]}
+
+    first = client.post("/api/publish", headers=headers, json=payload)
+    assert first.status_code == 202
+    job_id = first.json()["job_id"]
+    failed = client.get(f"/api/jobs/{job_id}")
+    assert failed.status_code == 200
+    assert failed.json()["status"] == "INITIATION_FAILED"
+    assert "authorization expired or unavailable" in failed.json()["fail_reason"]
+    assert provider_calls == []
+
+    with factory() as session:
+        linked = session.scalar(select(LinkedAccount).where(LinkedAccount.session_id == session_id))
+        linked.access_expires_at = int(time.time()) + 3600
+        linked.refresh_expires_at = int(time.time()) + 86_400
+        session.commit()
+
+    retry = client.post("/api/publish", headers=headers, json=payload)
+    assert retry.status_code == 202
+    assert retry.json()["job_id"] == job_id
+    assert retry.json()["retry_queued"] is True
+    assert provider_calls.count("/v2/post/publish/inbox/video/init/") == 1
+    assert provider_calls.count("/video/") == 1
+
+    finished = client.get(f"/api/jobs/{job_id}")
+    assert finished.status_code == 200
+    assert finished.json()["status"] == "PROCESSING"
+    assert provider_calls.count("/v2/post/publish/inbox/video/init/") == 1
+
+
 def test_publish_worker_recovers_a_persisted_encrypted_queue_job(tmp_path):
     app, client, factory, session_id, media_path = _linked_video(tmp_path, duration_ms=5000)
     provider_calls = []

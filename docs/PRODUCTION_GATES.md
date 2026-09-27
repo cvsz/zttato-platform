@@ -120,7 +120,7 @@ Affiliate readiness is independent of TikTok readiness.
 
 - [ ] Publishing uses a provider-neutral contract.
 - [ ] Publish jobs are tenant-scoped.
-- [ ] Publishing is idempotent (durable DB queue, HMAC request fingerprint and same-key replay verified by local synthetic regression tests; external provider reconciliation is still open).
+- [ ] Publishing is idempotent (durable DB queue, HMAC request fingerprint, same-key uncertain replay protection, and safe explicit retry of confirmed pre-initiation failures verified by local synthetic regression tests; external provider reconciliation is still open).
 - [ ] Duplicate requests cannot create duplicate provider operations (row-locked claims and same-key replay do not repeat the provider call in synthetic tests; real TikTok timeout-after-success reconciliation remains external).
 - [ ] Retry/backoff/rate-limit behavior is bounded and observable.
 - [ ] Failed distribution jobs do not corrupt Affiliate Core entities.
@@ -143,7 +143,7 @@ Affiliate readiness is independent of TikTok readiness.
 
 ## P1 — database and operations
 
-- [x] Versioned Alembic migrations exist through `20260927_04` and automatic `create_all` is disabled in staging/production (latest migration still needs an isolated PostgreSQL rehearsal).
+- [x] Versioned Alembic migrations exist through `20260927_04` and automatic `create_all` is disabled in staging/production (isolated PostgreSQL 17 migration and restore rehearsal passed; see timestamped evidence).
 - [x] Isolated PostgreSQL migration and restore have been executed and timestamped.
 - [x] Scheduled cleanup removes expired browser/OAuth records and expired media (isolated synthetic staging only).
 - [ ] Content Posting webhooks are validated and authenticated where adopted.
