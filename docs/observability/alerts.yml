@@ -1,0 +1,76 @@
+groups:
+  - name: zttato-application
+    rules:
+      - alert: ZttatoHighHttp5xxRate
+        expr: >-
+          sum(rate(zttato_http_requests_total{status=~"5.."}[5m]))
+          / clamp_min(sum(rate(zttato_http_requests_total[5m])), 0.001) > 0.05
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: zTTato HTTP 5xx rate is above 5 percent
+          description: Check the database, dependency health and current migration revision.
+
+      - alert: ZttatoElevatedHttp429Rate
+        expr: sum(rate(zttato_http_requests_total{status="429"}[5m])) > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: zTTato is returning more than one 429 response per second
+          description: Separate application quota rejections from TikTok upstream limits before changing thresholds.
+
+      - alert: ZttatoOAuthFailures
+        expr: sum(increase(zttato_oauth_failures_total[15m])) > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: OAuth route failures exceeded five in fifteen minutes
+          description: Review sanitized OAuth error counts and TikTok dependency status; never log authorization codes or tokens.
+
+      - alert: ZttatoRetentionCleanupFailed
+        expr: increase(zttato_cleanup_runs_total{result="failure"}[15m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: Scheduled retention cleanup failed
+          description: Check database migration readiness and media filesystem permissions.
+
+      - alert: ZttatoRetentionCleanupStale
+        expr: time() - zttato_cleanup_last_success_timestamp_seconds > 7200
+        for: 5m
+        labels:
+          severity: page
+        annotations:
+          summary: No successful retention cleanup in two hours
+          description: Check application replicas and cleanup task health.
+
+      - alert: ZttatoMediaFileDeletionFailed
+        expr: increase(zttato_cleanup_file_delete_failures_total[15m]) > 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: One or more expired media files could not be deleted
+          description: Check MEDIA_DIR mount and permissions; affected database metadata is retained for retry.
+
+      - alert: ZttatoMediaDiskLow
+        expr: zttato_media_disk_free_bytes / clamp_min(zttato_media_disk_total_bytes, 1) < 0.10
+        for: 10m
+        labels:
+          severity: page
+        annotations:
+          summary: Less than ten percent free space remains on the media filesystem
+          description: Expand or reclaim the staging/production media volume before uploads fail.
+
+      - alert: ZttatoReadinessProbeFailed
+        expr: probe_success{job="zttato-readiness"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: zTTato readiness probe failed
+          description: Configure a private HTTPS probe for /health/ready and inspect sanitized runtime status.

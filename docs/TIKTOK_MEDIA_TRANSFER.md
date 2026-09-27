@@ -1,4 +1,4 @@
-# TikTok Media Transfer Contract — 2026-09-25
+# TikTok Media Transfer Contract — 2026-09-27
 
 Official reference: https://developers.tiktok.com/docs/en/content-posting-api-media-transfer-guide
 Direct Post reference: https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post
@@ -20,6 +20,26 @@ Direct Post reference: https://developers.tiktok.com/docs/en/content-posting-api
 The zTTato web application currently accepts local MP4 files up to **64 MiB** by design. Files between 64,000,001 and 67,108,864 bytes use the new multi-chunk transfer path. The 4 GB number is the TikTok API upper bound, **not** the supported web-app upload size. Larger uploads, resumability, background workers, managed object storage, media inspection, and durable upload reconciliation require separate architecture and resource-limit work.
 
 The browser application does not expose `PULL_FROM_URL`. That mode requires a verified TikTok URL property, a publicly available HTTPS asset under the owned property, no redirects, an uninterrupted download window of up to one hour, and status reconciliation. Do not enable it until those requirements are tested against the exact developer application.
+
+## Products, scopes and limits
+
+การตั้งค่า OAuth ของเว็บ zTTato ขอเฉพาะ scopes ที่โค้ดใช้:
+
+| TikTok product/scope | การใช้งานใน zTTato |
+| --- | --- |
+| Login Kit + `user.info.basic` | OAuth login และแสดงชื่อ/avatar ที่ได้รับอนุญาต |
+| Content Posting API + `video.upload` | ส่ง draft เข้า TikTok inbox |
+| Content Posting API + `video.publish` | Direct Post หลัง query creator info และได้รับ consent |
+| `user.info.profile`, `user.info.stats`, `video.list` | ไม่มีฟีเจอร์ที่เรียก scope เหล่านี้ในเว็บปัจจุบัน จึงไม่ร้องขอ |
+| Share Kit | เป็น product สำหรับแชร์จาก mobile app; ไม่มี mobile client ใน zTTato web จึงไม่เปิดใช้ |
+
+การมี scope เปิดใน Developer Portal ไม่ได้แปลว่าผู้ใช้อนุญาต scope นั้นแล้ว ต้องตรวจ consent จริงและรายการ scopes ที่คืนมาทุกครั้ง หาก Developer Portal แสดง scope เพิ่มเติม ให้คง OAuth request ไว้ตามขั้นต่ำข้างต้นจนกว่าจะมีฟีเจอร์และ review evidence ที่ต้องใช้ scope นั้น
+
+Direct Post ตรวจ `max_video_post_duration_sec` จาก creator-info response สดก่อนเริ่ม และตรวจ caption เป็น UTF-16 code units สูงสุด 2,200 ตัวก่อนส่ง API แอปจำกัด `/api/publish` ไว้ 6 requests/minute ต่อ session และ creator-info ไว้ 20 requests/minute ต่อ session พร้อม general request quota และ upload/day + byte quotas
+
+TikTok ปัจจุบันจำกัด Direct Post init 6 requests/minute ต่อ user access token และ creator-info 20 requests/minute ต่อ token. HTTP 429 และ provider error `rate_limit_exceeded` ถูกแปลงเป็น 429 พร้อม `Retry-After` เมื่อ TikTok ให้ค่า; posting-cap errors ก็ถูกจัดเป็น 429 ส่วน `spam_risk_user_banned_from_posting` เป็น 403. Unit/MockTransport tests ตรวจการแปล error เหล่านี้เท่านั้น; พฤติกรรม live rate limit ต้องทดสอบกับ authorized TikTok Sandbox และยังเป็น `BLOCKED_EXTERNAL` จนกว่าจะมีบัญชีและหลักฐานจริง.
+
+Official references: [Scopes reference](https://developers.tiktok.com/docs/en/tiktok-api-scopes), [Direct Post](https://developers.tiktok.com/docs/en/content-posting-api-reference-direct-post), [Query Creator Info](https://developers.tiktok.com/docs/en/content-posting-api-reference-query-creator-info), [Share Kit](https://developers.tiktok.com/products/share-kit).
 
 ## Verification matrix
 

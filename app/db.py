@@ -1,9 +1,18 @@
 import time
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import (
+    BigInteger,
+    ForeignKey,
+    Integer,
+    PrimaryKeyConstraint,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-MIGRATION_HEAD = "20260924_01"
+MIGRATION_HEAD = "20260927_02"
 
 
 class Base(DeclarativeBase):
@@ -44,6 +53,7 @@ class MediaAsset(Base):
     filename: Mapped[str] = mapped_column(String(200), nullable=False)
     size: Mapped[int] = mapped_column(Integer, nullable=False)
     path: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
@@ -59,7 +69,20 @@ class PublishJob(Base):
     fail_reason: Mapped[str | None] = mapped_column(String(160), nullable=True)
     checked_at: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+    updated_at: Mapped[int | None] = mapped_column(Integer, nullable=True, default=lambda: int(time.time()))
     __table_args__ = (UniqueConstraint("session_id", "idempotency_key", name="uq_publish_once"),)
+
+
+class QuotaBucket(Base):
+    """Persistent fixed-window quotas keyed by a one-way subject hash."""
+
+    __tablename__ = "request_quota_buckets"
+    subject_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    window_start: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    __table_args__ = (PrimaryKeyConstraint("subject_hash", "scope", "window_start", name="pk_request_quota_buckets"),)
 
 
 def make_session_factory(database_url: str, *, bootstrap: bool = True):

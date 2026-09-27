@@ -1,225 +1,244 @@
 #!/usr/bin/env bash
-# PostgreSQL Restore Drill
-# Creates isolated source/restore databases, backs up, restores, and validates.
+# Restore rehearsal only. This script never connects to an unspecified database.
 
-set -euo pipefail
+set -Eeuo pipefail
+umask 077
 
-# Configuration
-DB_HOST="${PGHOST:-localhost}"
-DB_PORT="${PGPORT:-5432}"
-DB_USER="${PGUSER:-postgres}"
-DB_PASS="${PGPASSWORD:-postgres}"
-DRIVER="postgresql+psycopg"
+die() {
+  printf 'FAIL: %s\n' "$1" >&2
+  exit 1
+}
 
-# Unique test databases
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-SOURCE_DB="zttato_restore_source_${TIMESTAMP}"
-RESTORE_DB="zttato_restore_target_${TIMESTAMP}"
-BACKUP_FILE="/tmp/zttato_restore_${TIMESTAMP}.dump"
-TEST_KEY="LZ0X0j0BNWv190IVhPFHWRvU0bqtPmi3yB8elYcJcUc="
+[[ "${ZTTATO_DRILL_CONFIRM:-}" == "ISOLATED_STAGING_ONLY" ]] || die "Set ZTTATO_DRILL_CONFIRM=ISOLATED_STAGING_ONLY"
+[[ "${PGHOST:-}" == "127.0.0.1" ]] || die "PGHOST must be 127.0.0.1"
+[[ "${PGPORT:-}" =~ ^[0-9]{1,5}$ ]] && (( PGPORT >= 1 && PGPORT <= 65535 )) || die "Set a valid isolated staging PGPORT"
+[[ -n "${PGUSER:-}" && -n "${PGPASSWORD:-}" && -n "${ZTTATO_DRILL_ADMIN_DB:-}" ]] || die "Set isolated staging PGUSER, PGPASSWORD and ZTTATO_DRILL_ADMIN_DB"
+[[ "$PGPASSWORD" =~ ^[A-Fa-f0-9]{32,}$ ]] || die "Use a hex-only synthetic staging password of at least 32 characters"
+for binary in psql pg_dump pg_restore createdb dropdb alembic python3; do
+  command -v "$binary" >/dev/null || die "$binary is required"
+done
 
-export PGHOST="${DB_HOST}"
-export PGPORT="${DB_PORT}"
-export PGUSER="${DB_USER}"
-export PGPASSWORD="${DB_PASS}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SUFFIX="$(date -u +%Y%m%d%H%M%S)_$(od -An -N4 -tx1 /dev/urandom | tr -d ' \n')"
+SOURCE_DB="zttato_drill_src_${SUFFIX}"
+RESTORE_DB="zttato_drill_dst_${SUFFIX}"
+EXPECTED_MIGRATION_HEAD="20260927_02"
+BACKUP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zttato-backup.XXXXXX")"
+ESCROW_DIR="$(mktemp -d "${TMPDIR:-/tmp}/zttato-key-escrow.XXXXXX")"
+chmod 700 "$BACKUP_DIR" "$ESCROW_DIR"
+BACKUP_FILE="$BACKUP_DIR/staging.dump"
+KEY_FILE="$ESCROW_DIR/fernet.key"
+EXPECTED_FILE="$ESCROW_DIR/expected.json"
+PGPASS_FILE="$(mktemp "${TMPDIR:-/tmp}/zttato-pgpass.XXXXXX")"
+chmod 600 "$PGPASS_FILE"
+DRILL_PASSWORD="$PGPASSWORD"
+printf '%s:%s:*:%s:%s\n' "$PGHOST" "$PGPORT" "$PGUSER" "$DRILL_PASSWORD" > "$PGPASS_FILE"
+export PGPASSFILE="$PGPASS_FILE" PGDATABASE="$ZTTATO_DRILL_ADMIN_DB" PGSSLMODE=disable
+export ZTTATO_DRILL_PASSWORD_INTERNAL="$DRILL_PASSWORD"
+unset PGPASSWORD DRILL_PASSWORD
 
-log() { echo "[$(date -Iseconds)] $*"; }
-die() { log "ERROR: $*"; exit 1; }
+cleanup() {
+  set +e
+  dropdb --if-exists --maintenance-db="$ZTTATO_DRILL_ADMIN_DB" "$SOURCE_DB" >/dev/null 2>&1
+  dropdb --if-exists --maintenance-db="$ZTTATO_DRILL_ADMIN_DB" "$RESTORE_DB" >/dev/null 2>&1
+  if command -v shred >/dev/null; then
+    shred -u "$KEY_FILE" "$EXPECTED_FILE" 2>/dev/null
+  fi
+  rm -rf -- "$BACKUP_DIR" "$ESCROW_DIR" "$PGPASS_FILE"
+}
+trap cleanup EXIT HUP INT TERM
 
-# Check PostgreSQL connection
-log "Checking PostgreSQL connectivity..."
-psql -c "SELECT version();" >/dev/null || die "Cannot connect to PostgreSQL"
-
-# Create source database
-log "Creating source database: ${SOURCE_DB}"
-psql -c "CREATE DATABASE ${SOURCE_DB};" || die "Failed to create source database"
-
-# Run migrations on source
-log "Running Alembic migrations on source..."
-export DATABASE_URL="${DRIVER}://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${SOURCE_DB}"
-alembic upgrade head || die "Migration failed on source"
-
-# Insert representative test data
-log "Inserting test data..."
-psql -d "${SOURCE_DB}" <<'SQL'
--- Browser session
-INSERT INTO browser_sessions (id, csrf_hash, expires_at, created_at)
-VALUES ('test_session_1', 'test_csrf_hash', 9999999999, 1700000000);
-
--- OAuth request
-INSERT INTO oauth_requests (state_hash, session_id, expires_at)
-VALUES ('test_state_hash', 'test_session_1', 9999999999);
-
--- Linked account with encrypted tokens
-INSERT INTO linked_accounts (session_id, open_id, scopes, access_cipher, refresh_cipher, access_expires_at, refresh_expires_at)
-VALUES (
-  'test_session_1',
-  'test_open_id_123',
-  'user.info.basic,video.upload,video.publish',
-  'gAAAAABl7test_access_token_encrypted',
-  'gAAAAABl7test_refresh_token_encrypted',
-  9999999999,
-  9999999999
-);
-
--- Media asset
-INSERT INTO media_assets (id, session_id, filename, size, path, created_at)
-VALUES ('test_media_1', 'test_session_1', 'test_video.mp4', 1024000, '/srv/media/test_media_1.mp4', 1700000000);
-
--- Publish job (draft)
-INSERT INTO publish_jobs (id, session_id, idempotency_key, media_id, mode, publish_id, status, fail_reason, checked_at, created_at)
-VALUES ('test_job_1', 'test_session_1', 'idemkey_draft_1234567890123456', 'test_media_1', 'draft', 'tiktok_publish_id_1', 'TRANSFER_PENDING', NULL, 0, 1700000000);
-
--- Publish job (direct)
-INSERT INTO publish_jobs (id, session_id, idempotency_key, media_id, mode, publish_id, status, fail_reason, checked_at, created_at)
-VALUES ('test_job_2', 'test_session_1', 'idemkey_direct_1234567890123456', 'test_media_1', 'direct', 'tiktok_publish_id_2', 'PROCESSING', NULL, 0, 1700000000);
-
--- Idempotency test: duplicate key should fail
--- This is validated by the unique constraint on (session_id, idempotency_key)
-SQL
-
-log "Test data inserted."
-
-# Record source counts
-SOURCE_COUNTS=$(psql -d "${SOURCE_DB}" -t -c "
-SELECT
-  (SELECT count(*) FROM browser_sessions) AS sessions,
-  (SELECT count(*) FROM oauth_requests) AS oauth,
-  (SELECT count(*) FROM linked_accounts) AS accounts,
-  (SELECT count(*) FROM media_assets) AS media,
-  (SELECT count(*) FROM publish_jobs) AS jobs;
-")
-log "Source counts: ${SOURCE_COUNTS}"
-
-# Create backup
-log "Creating pg_dump backup..."
-pg_dump -Fc -f "${BACKUP_FILE}" -d "${SOURCE_DB}" || die "pg_dump failed"
-BACKUP_SIZE=$(stat -c%s "${BACKUP_FILE}")
-BACKUP_CHECKSUM=$(sha256sum "${BACKUP_FILE}" | cut -d' ' -f1)
-log "Backup created: ${BACKUP_FILE} (${BACKUP_SIZE} bytes, SHA256: ${BACKUP_CHECKSUM})"
-
-# Create restore database
-log "Creating restore database: ${RESTORE_DB}"
-psql -c "CREATE DATABASE ${RESTORE_DB};" || die "Failed to create restore database"
-
-# Restore
-log "Restoring with pg_restore --exit-on-error..."
-pg_restore --exit-on-error -d "${RESTORE_DB}" "${BACKUP_FILE}" || die "pg_restore failed"
-log "Restore completed."
-
-# Validate restore counts
-RESTORE_COUNTS=$(psql -d "${RESTORE_DB}" -t -c "
-SELECT
-  (SELECT count(*) FROM browser_sessions) AS sessions,
-  (SELECT count(*) FROM oauth_requests) AS oauth,
-  (SELECT count(*) FROM linked_accounts) AS accounts,
-  (SELECT count(*) FROM media_assets) AS media,
-  (SELECT count(*) FROM publish_jobs) AS jobs;
-")
-log "Restore counts: ${RESTORE_COUNTS}"
-
-# Compare counts
-if [[ "${SOURCE_COUNTS}" == "${RESTORE_COUNTS}" ]]; then
-  log "PASS: Row counts match."
-else
-  die "FAIL: Row counts differ. Source: ${SOURCE_COUNTS}, Restore: ${RESTORE_COUNTS}"
-fi
-
-# Validate relationships and constraints
-log "Validating relationships and constraints..."
-psql -d "${RESTORE_DB}" <<'SQL'
--- Check foreign key constraints
-SELECT conname, conrelid::regclass, confrelid::regclass
-FROM pg_constraint
-WHERE contype = 'f' AND connamespace = 'public'::regnamespace;
-
--- Check unique constraint on publish_jobs
-SELECT conname, conrelid::regclass
-FROM pg_constraint
-WHERE contype = 'u' AND conname = 'uq_publish_once';
-
--- Verify idempotency keys are preserved
-SELECT session_id, idempotency_key, mode, status FROM publish_jobs;
-SQL
-
-# Test encryption/decryption with isolated test key
-log "Testing encryption/decryption..."
-cd /home/cvsz/zttato-platform
-python3 <<PYEOF
+make_database_url() {
+  DATABASE_NAME_INTERNAL="$1" python3 - <<'PY'
 import os
-os.environ['DATABASE_URL'] = '${DRIVER}://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${RESTORE_DB}'
-os.environ['APP_ENCRYPTION_KEY'] = '${TEST_KEY}'
+from urllib.parse import quote
+user = quote(os.environ["PGUSER"], safe="")
+password = quote(os.environ["ZTTATO_DRILL_PASSWORD_INTERNAL"], safe="")
+print(f"postgresql+psycopg://{user}:{password}@127.0.0.1:{os.environ['PGPORT']}/{os.environ['DATABASE_NAME_INTERNAL']}")
+PY
+}
 
+SERVER_VERSION="$(psql -XAt -v ON_ERROR_STOP=1 -c "SELECT current_setting('server_version_num')")" || die "Staging PostgreSQL is unreachable"
+[[ "$SERVER_VERSION" =~ ^17[0-9]{4}$ ]] || die "Restore drill requires PostgreSQL major version 17"
+
+python3 - <<'PY' > "$KEY_FILE"
+from cryptography.fernet import Fernet
+print(Fernet.generate_key().decode("ascii"))
+PY
+chmod 600 "$KEY_FILE"
+python3 - <<'PY' > "$EXPECTED_FILE"
+import json
+import secrets
+print(json.dumps({"access": secrets.token_urlsafe(36), "refresh": secrets.token_urlsafe(36)}))
+PY
+chmod 600 "$EXPECTED_FILE"
+
+createdb --maintenance-db="$ZTTATO_DRILL_ADMIN_DB" "$SOURCE_DB" >/dev/null
+createdb --maintenance-db="$ZTTATO_DRILL_ADMIN_DB" "$RESTORE_DB" >/dev/null
+
+export ZTTATO_DRILL_KEY_FILE="$KEY_FILE" ZTTATO_DRILL_EXPECTED_FILE="$EXPECTED_FILE"
+export ZTTATO_DRILL_SOURCE_DB_INTERNAL="$SOURCE_DB"
+export DATABASE_URL="$(make_database_url "$SOURCE_DB")"
+(cd "$ROOT" && alembic upgrade head >/dev/null) || die "Versioned migration failed"
+
+python3 - <<'PY'
+import json
+import os
+import time
+import uuid
+from pathlib import Path
+
+from app.db import BrowserSession, LinkedAccount, MediaAsset, OAuthRequest, PublishJob, make_session_factory
+from app.security import TokenCipher, digest
+
+key = Path(os.environ["ZTTATO_DRILL_KEY_FILE"]).read_text().strip()
+tokens = json.loads(Path(os.environ["ZTTATO_DRILL_EXPECTED_FILE"]).read_text())
+cipher = TokenCipher(key)
+engine, factory = make_session_factory(os.environ["DATABASE_URL"], bootstrap=False)
+now = int(time.time())
+session_id = digest("isolated-synthetic-session-" + str(uuid.uuid4()))
+media_id = str(uuid.uuid4())
+with factory() as session:
+    session.add(BrowserSession(id=session_id, csrf_hash=digest("synthetic-csrf"), expires_at=now + 3600, created_at=now))
+    session.add(OAuthRequest(state_hash=digest("synthetic-oauth-state"), session_id=session_id, expires_at=now + 900))
+    session.add(
+        LinkedAccount(
+            session_id=session_id,
+            open_id="synthetic-account-only",
+            scopes="user.info.basic,video.upload,video.publish",
+            access_cipher=cipher.encrypt(tokens["access"]),
+            refresh_cipher=cipher.encrypt(tokens["refresh"]),
+            access_expires_at=now + 3600,
+            refresh_expires_at=now + 86400,
+        )
+    )
+    session.add(
+        MediaAsset(
+            id=media_id,
+            session_id=session_id,
+            filename="synthetic.mp4",
+            size=32,
+            path="/synthetic/sentinel.mp4",
+            duration_ms=1000,
+            created_at=now,
+        )
+    )
+    session.flush()
+    session.add(
+        PublishJob(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            idempotency_key="synthetic-restore-drill-idempotency",
+            media_id=media_id,
+            mode="draft",
+            publish_id="synthetic-publish-id",
+            status="RECONCILIATION_REQUIRED",
+            checked_at=0,
+            created_at=now,
+        )
+    )
+    session.commit()
+engine.dispose()
+PY
+
+BACKUP_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+pg_dump --no-owner --no-privileges --format=custom --file="$BACKUP_FILE" --dbname="$SOURCE_DB" >/dev/null || die "pg_dump failed"
+BACKUP_COMPLETED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+BACKUP_SIZE="$(stat -c '%s' "$BACKUP_FILE")"
+BACKUP_SHA256="$(sha256sum "$BACKUP_FILE" | cut -d' ' -f1)"
+RESTORE_STARTED_EPOCH="$(date +%s)"
+RESTORE_STARTED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+pg_restore --no-owner --no-privileges --exit-on-error --dbname="$RESTORE_DB" "$BACKUP_FILE" >/dev/null || die "pg_restore failed"
+
+export BACKUP_PATH_INTERNAL="$BACKUP_FILE"
+export ZTTATO_DRILL_RESTORE_DB_INTERNAL="$RESTORE_DB"
+export ZTTATO_DRILL_RESTORE_URL="$(make_database_url "$RESTORE_DB")"
+python3 - <<'PY'
+import json
+import os
+from pathlib import Path
+
+from alembic.runtime.migration import MigrationContext
+from sqlalchemy import create_engine, func, select
+
+from app.db import BrowserSession, LinkedAccount, MediaAsset, OAuthRequest, PublishJob, MIGRATION_HEAD, make_session_factory
 from app.security import TokenCipher
-from app.db import make_session_factory, BrowserSession, LinkedAccount
 
-cipher = TokenCipher('${TEST_KEY}')
+expected = json.loads(Path(os.environ["ZTTATO_DRILL_EXPECTED_FILE"]).read_text())
+key = Path(os.environ["ZTTATO_DRILL_KEY_FILE"]).read_bytes().strip()
+cipher = TokenCipher(key.decode("ascii"))
+engine, factory = make_session_factory(os.environ["ZTTATO_DRILL_RESTORE_URL"], bootstrap=False)
+with engine.connect() as connection:
+    revision = MigrationContext.configure(connection).get_current_revision()
+assert revision == MIGRATION_HEAD
+with factory() as session:
+    rows = {
+        "sessions": session.scalar(select(func.count()).select_from(BrowserSession)),
+        "oauth": session.scalar(select(func.count()).select_from(OAuthRequest)),
+        "accounts": session.scalar(select(func.count()).select_from(LinkedAccount)),
+        "media": session.scalar(select(func.count()).select_from(MediaAsset)),
+        "jobs": session.scalar(select(func.count()).select_from(PublishJob)),
+    }
+    account = session.scalar(select(LinkedAccount))
+    assert account is not None
+    assert cipher.decrypt(account.access_cipher) == expected["access"]
+    assert cipher.decrypt(account.refresh_cipher) == expected["refresh"]
+    assert rows == {"sessions": 1, "oauth": 1, "accounts": 1, "media": 1, "jobs": 1}
+assert key not in Path(os.environ["BACKUP_PATH_INTERNAL"]).read_bytes()
+engine.dispose()
+print("restore_content=PASS")
+print("fernet_decrypt=PASS")
+print(f"migration_revision={revision}")
+print("row_counts=sessions:1,oauth:1,accounts:1,media:1,jobs:1")
+PY
 
-# Test encrypt/decrypt roundtrip
-test_token = "test_tiktok_access_token_12345"
-encrypted = cipher.encrypt(test_token)
-decrypted = cipher.decrypt(encrypted)
-assert decrypted == test_token, f"Decryption failed: {decrypted} != {test_token}"
-print(f"Encryption roundtrip: PASS")
+RESTORE_COMPLETED="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+RESTORE_COMPLETED_EPOCH="$(date +%s)"
+RTO_SECONDS="$((RESTORE_COMPLETED_EPOCH - RESTORE_STARTED_EPOCH))"
+SOURCE_COMMIT="$(git -C "$ROOT" rev-parse HEAD)"
 
-# Test with database
-engine, session_factory = make_session_factory(os.environ['DATABASE_URL'])
-with session_factory() as session:
-    # Verify existing encrypted data can be read (or at least structure is correct)
-    account = session.query(LinkedAccount).first()
-    if account:
-        print(f"Found linked account: {account.open_id}")
-        # Try decrypting - will fail with test key but structure validated
-        try:
-            cipher.decrypt(account.access_cipher)
-            print("Decryption with test key: UNEXPECTED SUCCESS (data was encrypted with test key)")
-        except Exception as e:
-            print(f"Decryption with test key: EXPECTED FAILURE (different key used) - {type(e).__name__}")
-    else:
-        print("No linked accounts in restore DB")
+cat <<EOF
+restore_drill=PASS
+environment=isolated_synthetic_staging
+postgres_major=17
+timestamp_utc=$RESTORE_COMPLETED
+backup_started_utc=$BACKUP_STARTED
+backup_completed_utc=$BACKUP_COMPLETED
+restore_started_utc=$RESTORE_STARTED
+restore_completed_utc=$RESTORE_COMPLETED
+synthetic_rpo_seconds=0
+measured_restore_rto_seconds=$RTO_SECONDS
+backup_size_bytes=$BACKUP_SIZE
+backup_sha256=$BACKUP_SHA256
+migration_revision=$EXPECTED_MIGRATION_HEAD
+source_commit=$SOURCE_COMMIT
+secret_values=redacted
+production_data_or_credentials=not_used
+EOF
 
-    # Verify migrations applied
-    from alembic.runtime.migration import MigrationContext
-    from alembic.script import ScriptDirectory
-    context = MigrationContext.configure(engine.connect())
-    current_rev = context.get_current_revision()
-    print(f"Current migration revision: {current_rev}")
-    assert current_rev == '20260924_01', f"Expected revision 20260924_01, got {current_rev}"
+if [[ -n "${ZTTATO_DRILL_REPORT:-}" ]]; then
+  REPORT_DIR="$(dirname "$ZTTATO_DRILL_REPORT")"
+  mkdir -p "$REPORT_DIR"
+  cat > "$ZTTATO_DRILL_REPORT" <<EOF
+# Isolated PostgreSQL 17 restore rehearsal
 
-print("Encryption/migration validation: PASS")
-PYEOF
-
-log "Encryption/migration validation passed."
-
-# Test application readiness (health/ready)
-log "Testing application readiness against restored database..."
-export DATABASE_URL="${DRIVER}://${DB_USER}:${DB_PASS}@${DB_HOST}:${DB_PORT}/${RESTORE_DB}"
-export APP_ENCRYPTION_KEY="${TEST_KEY}"
-export TIKTOK_CLIENT_KEY="test"
-export TIKTOK_CLIENT_SECRET="test"
-export APP_BASE_URL="http://localhost:8000"
-export APP_ALLOWED_HOSTS="localhost,127.0.0.1"
-
-python3 -c "
-from app.main import create_app
-from app.config import load_settings
-s = load_settings()
-app = create_app(s)
-print('App creation: PASS')
-" || die "Application creation failed"
-
-log "Application readiness: PASS"
-
-# Cleanup
-log "Cleaning up test databases..."
-psql -c "DROP DATABASE IF EXISTS ${SOURCE_DB};"
-psql -c "DROP DATABASE IF EXISTS ${RESTORE_DB};"
-rm -f "${BACKUP_FILE}"
-
-log "=== RESTORE DRILL COMPLETED SUCCESSFULLY ==="
-log "Timestamp: $(date -Iseconds)"
-log "PostgreSQL version: $(psql -t -c 'SELECT version();' | head -1 | xargs)"
-log "Source commit: $(cd /home/cvsz/zttato-platform && git rev-parse HEAD)"
-log "Backup checksum: ${BACKUP_CHECKSUM}"
-log "Restore outcome: SUCCESS"
-log "Verification: Row counts, relationships, constraints, encryption, migrations, app readiness"
+- Result: PASS
+- Environment: isolated synthetic staging database on loopback
+- Completed UTC: $RESTORE_COMPLETED
+- Backup start UTC: $BACKUP_STARTED
+- Backup complete UTC: $BACKUP_COMPLETED
+- Restore start UTC: $RESTORE_STARTED
+- Restore complete UTC: $RESTORE_COMPLETED
+- Synthetic RPO: 0 seconds (no writes after the controlled snapshot)
+- Measured restore RTO: $RTO_SECONDS seconds (pg_restore and decrypt verification)
+- PostgreSQL major: 17
+- Backup size: $BACKUP_SIZE bytes
+- Backup SHA-256: $BACKUP_SHA256
+- Migration revision: $EXPECTED_MIGRATION_HEAD
+- Synthetic authorization, session, OAuth, media and job rows: 1 each
+- Separately stored drill Fernet key: used for successful access and refresh token decryption; key deleted after drill
+- Credentials, plaintext test tokens, OAuth state and account identifiers: redacted and deleted after drill
+- Production database, TikTok credentials and production encryption key: not used
+EOF
+  chmod 600 "$ZTTATO_DRILL_REPORT"
+fi

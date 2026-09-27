@@ -1,0 +1,96 @@
+rule_files:
+  - alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: all alert thresholds fire from synthetic metrics
+    interval: 1m
+    input_series:
+      - series: 'zttato_http_requests_total{method="GET",status="500"}'
+        values: "0+10x140"
+      - series: 'zttato_http_requests_total{method="GET",status="200"}'
+        values: "0+80x140"
+      - series: 'zttato_http_requests_total{method="GET",status="429"}'
+        values: "0+70x140"
+      - series: 'zttato_oauth_failures_total{status="400"}'
+        values: "0+2x140"
+      - series: 'zttato_cleanup_runs_total{result="failure"}'
+        values: "0+1x140"
+      - series: zttato_cleanup_last_success_timestamp_seconds
+        values: "0+0x140"
+      - series: zttato_cleanup_file_delete_failures_total
+        values: "0+1x140"
+      - series: zttato_media_disk_free_bytes
+        values: "5+0x140"
+      - series: zttato_media_disk_total_bytes
+        values: "100+0x140"
+      - series: 'probe_success{job="zttato-readiness"}'
+        values: "0+0x140"
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: ZttatoHighHttp5xxRate
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: zTTato HTTP 5xx rate is above 5 percent
+              description: Check the database, dependency health and current migration revision.
+      - eval_time: 11m
+        alertname: ZttatoElevatedHttp429Rate
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: zTTato is returning more than one 429 response per second
+              description: Separate application quota rejections from TikTok upstream limits before changing thresholds.
+      - eval_time: 11m
+        alertname: ZttatoOAuthFailures
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: OAuth route failures exceeded five in fifteen minutes
+              description: Review sanitized OAuth error counts and TikTok dependency status; never log authorization codes or tokens.
+      - eval_time: 3m
+        alertname: ZttatoRetentionCleanupFailed
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              result: failure
+            exp_annotations:
+              summary: Scheduled retention cleanup failed
+              description: Check database migration readiness and media filesystem permissions.
+      - eval_time: 130m
+        alertname: ZttatoRetentionCleanupStale
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: No successful retention cleanup in two hours
+              description: Check application replicas and cleanup task health.
+      - eval_time: 3m
+        alertname: ZttatoMediaFileDeletionFailed
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: One or more expired media files could not be deleted
+              description: Check MEDIA_DIR mount and permissions; affected database metadata is retained for retry.
+      - eval_time: 12m
+        alertname: ZttatoMediaDiskLow
+        exp_alerts:
+          - exp_labels:
+              severity: page
+            exp_annotations:
+              summary: Less than ten percent free space remains on the media filesystem
+              description: Expand or reclaim the staging/production media volume before uploads fail.
+      - eval_time: 4m
+        alertname: ZttatoReadinessProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: page
+              job: zttato-readiness
+            exp_annotations:
+              summary: zTTato readiness probe failed
+              description: Configure a private HTTPS probe for /health/ready and inspect sanitized runtime status.

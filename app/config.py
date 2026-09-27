@@ -21,6 +21,13 @@ class Settings:
     max_video_bytes: int
     zwallet_adapter_url: str = ""
     z_platform_service_token: str = ""
+    max_requests_per_minute: int = 120
+    max_uploads_per_day: int = 10
+    max_upload_bytes_per_day: int = 268_435_456
+    media_retention_days: int = 30
+    record_retention_days: int = 90
+    cleanup_interval_seconds: int = 3600
+    metrics_bearer_token: str = ""
 
     @property
     def redirect_uri(self) -> str:
@@ -102,9 +109,28 @@ def load_settings() -> Settings:
         max_video_bytes=int(get("MAX_VIDEO_BYTES", "67108864")),
         zwallet_adapter_url=get("ZWALLET_ADAPTER_URL", "").strip().rstrip("/"),
         z_platform_service_token=get("Z_PLATFORM_SERVICE_TOKEN", ""),
+        max_requests_per_minute=int(get("MAX_REQUESTS_PER_MINUTE", "120")),
+        max_uploads_per_day=int(get("MAX_UPLOADS_PER_DAY", "10")),
+        max_upload_bytes_per_day=int(get("MAX_UPLOAD_BYTES_PER_DAY", str(256 * 1024 * 1024))),
+        media_retention_days=int(get("MEDIA_RETENTION_DAYS", "30")),
+        record_retention_days=int(get("RECORD_RETENTION_DAYS", "90")),
+        cleanup_interval_seconds=int(get("CLEANUP_INTERVAL_SECONDS", "3600")),
+        metrics_bearer_token=get("METRICS_BEARER_TOKEN", ""),
     )
     validate_host_config(s)
     validate_zwallet_config(s)
+    if not 1 <= s.max_requests_per_minute <= 10_000:
+        raise ValueError("MAX_REQUESTS_PER_MINUTE must be between 1 and 10000")
+    if not 1 <= s.max_uploads_per_day <= 10_000:
+        raise ValueError("MAX_UPLOADS_PER_DAY must be between 1 and 10000")
+    if not s.max_video_bytes <= s.max_upload_bytes_per_day <= 10 * 1024**3:
+        raise ValueError("MAX_UPLOAD_BYTES_PER_DAY must be at least MAX_VIDEO_BYTES and at most 10 GiB")
+    if not 1 <= s.media_retention_days <= 3650 or not 1 <= s.record_retention_days <= 3650:
+        raise ValueError("Media and record retention must be between 1 and 3650 days")
+    if not 60 <= s.cleanup_interval_seconds <= 86_400:
+        raise ValueError("CLEANUP_INTERVAL_SECONDS must be between 60 and 86400")
+    if len(s.metrics_bearer_token) > 512:
+        raise ValueError("METRICS_BEARER_TOKEN must not exceed 512 characters")
     u = urlparse(s.base_url)
     if s.env == "production":
         if u.scheme != "https":

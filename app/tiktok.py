@@ -1,6 +1,8 @@
 """Official TikTok OAuth and Content Posting API transport. Never log tokens or upload URLs."""
 
+import email.utils
 import re
+import time
 from urllib.parse import urlparse
 
 import httpx
@@ -45,18 +47,46 @@ class TikTokClient:
                 timeout=httpx.Timeout(60.0), follow_redirects=False, trust_env=False, transport=self.transport
             ) as client:
                 response = await client.request(method, url, headers=headers, data=form, json=data)
+                if response.status_code == 429:
+                    raise self._rate_limit(response.headers.get("Retry-After"))
                 response.raise_for_status()
                 payload = response.json()
+        except HTTPException:
+            raise
         except (httpx.HTTPError, ValueError) as exc:
             raise HTTPException(502, "TikTok service temporarily unavailable") from exc
         if not isinstance(payload, dict):
             raise HTTPException(502, "Unexpected TikTok response")
         error = payload.get("error")
         if isinstance(error, dict) and error.get("code") not in (None, "", "ok"):
-            raise HTTPException(502, "TikTok rejected request: " + str(error.get("code", "unknown"))[:70])
+            code = str(error.get("code", "unknown"))[:70]
+            if code == "rate_limit_exceeded":
+                raise self._rate_limit(None)
+            if code in ("spam_risk_too_many_posts", "reached_active_user_cap"):
+                raise HTTPException(429, "TikTok posting limit reached; try again later")
+            if code == "spam_risk_user_banned_from_posting":
+                raise HTTPException(403, "TikTok has blocked posting for this creator")
+            raise HTTPException(502, "TikTok rejected request: " + code)
         if isinstance(error, str) and error:
             raise HTTPException(502, "TikTok OAuth rejected request")
         return payload
+
+    @staticmethod
+    def _rate_limit(retry_after: str | None) -> HTTPException:
+        headers = {}
+        if retry_after:
+            value = retry_after.strip()
+            if value.isdecimal():
+                seconds = min(max(int(value), 1), 3600)
+                headers["Retry-After"] = str(seconds)
+            else:
+                try:
+                    parsed = email.utils.parsedate_to_datetime(value)
+                    seconds = min(max(int(parsed.timestamp() - time.time()), 1), 3600)
+                    headers["Retry-After"] = str(seconds)
+                except (TypeError, ValueError, OverflowError):
+                    pass
+        return HTTPException(429, "TikTok rate limit exceeded; retry later", headers=headers or None)
 
     async def exchange(self, code: str) -> dict:
         s = self.settings
@@ -281,6 +311,8 @@ class TikTokClient:
                             },
                             content=content(),
                         )
+                        if response.status_code == 429:
+                            raise self._rate_limit(response.headers.get("Retry-After"))
                         # 206 confirms a nonfinal part; 201 means all parts were received.
                         expected = 201 if index == chunk_count - 1 else 206
                         if response.status_code != expected:

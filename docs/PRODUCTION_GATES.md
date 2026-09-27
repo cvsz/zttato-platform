@@ -4,6 +4,10 @@ Production-ready is an evidence claim, not a branch name.
 
 Use independent gates. Passing one gate does not imply that every other gate has passed.
 
+`[x]` records only the scope stated in the linked evidence. Isolated synthetic staging
+passes do not establish live production controls or external TikTok approval. See
+[2026-09-27 release-gate evidence](evidence/2026-09-27-release-gates.md).
+
 ## Scope model
 
 ```text
@@ -42,11 +46,11 @@ Do not infer production readiness from source-code existence, documentation, moc
 - [ ] Production environment validation passes with HTTPS, PostgreSQL and persistent encryption key.
 - [ ] Cloudflare/edge route exposes required public/legal/callback routes while admin surfaces remain protected.
 - [ ] Legal entity, contact and postal address are real and counsel has reviewed public policies.
-- [ ] PostgreSQL backup plus isolated restore is executed and timestamped.
-- [ ] Media retention/deletion behavior is verified.
-- [ ] Known-good container/image rollback is executed and timestamped.
+- [x] PostgreSQL backup plus isolated restore is executed and timestamped (isolated synthetic staging only).
+- [x] Media retention/deletion behavior is verified (isolated synthetic staging only).
+- [x] Known-good container/image rollback is executed and timestamped (isolated synthetic staging only).
 - [ ] Token encryption key backup/rotation and incident procedure is tested.
-- [ ] Monitoring/alerts cover 5xx, OAuth failures, provider errors, disk/media capacity and DB health.
+- [ ] Monitoring/alerts cover 5xx, OAuth failures, provider errors, disk/media capacity and DB health (rule logic tested; live Prometheus/Alertmanager routing and receiver remain unverified).
 - [ ] No credentials are present in repository history or release artifacts.
 
 ## P0 — security
@@ -56,7 +60,7 @@ Do not infer production readiness from source-code existence, documentation, moc
 - [ ] Access/refresh tokens are encrypted at rest and never logged or returned to clients.
 - [ ] Tenant/resource authorization is enforced server-side.
 - [ ] SSRF, CSRF, IDOR, path traversal, malicious upload and open redirect controls are tested.
-- [ ] Rate limiting/resource exhaustion controls are verified.
+- [x] Rate limiting/resource exhaustion controls are verified (application quotas and local/staging tests only).
 - [ ] Production errors do not expose stack traces, credentials or internal secrets.
 - [ ] Provider credentials are isolated from generic Affiliate services and browser code.
 
@@ -140,13 +144,13 @@ Affiliate readiness is independent of TikTok readiness.
 ## P1 — database and operations
 
 - [x] Initial versioned Alembic migration exists and automatic `create_all` is disabled in production (still needs live PostgreSQL rehearsal).
-- [ ] Isolated PostgreSQL migration and restore have been executed and timestamped.
-- [ ] Scheduled cleanup removes expired browser/OAuth records and expired media.
+- [x] Isolated PostgreSQL migration and restore have been executed and timestamped.
+- [x] Scheduled cleanup removes expired browser/OAuth records and expired media (isolated synthetic staging only).
 - [ ] Content Posting webhooks are validated and authenticated where adopted.
 - [ ] SBOM, container vulnerability scan and provenance evidence are produced for releases.
-- [ ] Load/soak baseline is documented.
-- [ ] Representative encrypted-token restore test is completed without exposing token values.
-- [ ] Rollback has been rehearsed for a schema-compatible release.
+- [x] Load/soak baseline is documented (local readiness endpoint only).
+- [x] Representative encrypted-token restore test is completed without exposing token values (synthetic drill key only).
+- [x] Rollback has been rehearsed for a schema-compatible release (old image with its pre-migration schema, isolated staging only).
 
 ## P1 — optional zWallet invoice intents
 

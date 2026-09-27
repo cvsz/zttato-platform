@@ -1,19 +1,29 @@
 """zTTato API. All TikTok secrets stay server-side; a browser session is not a TikTok access token."""
 
+import asyncio
 import html
+import hashlib
+import hmac
 import json
+import logging
 import os
 import secrets
+import threading
 import time
 import uuid
+from collections import Counter
+from contextlib import asynccontextmanager
 from pathlib import Path
+from time import perf_counter
 from urllib.parse import urlencode, urlparse
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.trustedhost import TrustedHostMiddleware
@@ -25,9 +35,12 @@ from app.db import (
     MediaAsset,
     OAuthRequest,
     PublishJob,
+    QuotaBucket,
     MIGRATION_HEAD,
     make_session_factory,
 )
+from app.media import InvalidMP4, mp4_duration_ms
+from app.maintenance import remove_local_upload, run_cleanup
 from app.security import TokenCipher, browser_session, digest, new_browser_session, require_csrf
 from app.tiktok import TikTokClient
 from app.zwallet import (
@@ -42,6 +55,17 @@ from app.i18n.routes import router as i18n_router
 WEB = Path(__file__).resolve().parent.parent / "web"
 COOKIE = "zttato_session"
 CSRF = "zttato_csrf"
+LOGGER = logging.getLogger("zttato.app")
+_REQUEST_COUNT: Counter[tuple[str, int]] = Counter()
+_REQUEST_DURATION: Counter[tuple[str, int]] = Counter()
+_OAUTH_ERRORS: Counter[int] = Counter()
+_CLEANUP_RUNS: Counter[str] = Counter()
+_CLEANUP_DELETED: Counter[str] = Counter()
+_CLEANUP_FILE_DELETE_FAILURES = 0
+_CLEANUP_LAST_SUCCESS = 0
+_VIDEO_UPLOADS = 0
+_VIDEO_UPLOAD_BYTES = 0
+_METRICS_LOCK = threading.Lock()
 
 
 AVATAR_CDN_SUFFIXES = (
@@ -90,6 +114,13 @@ class PublishInput(BaseModel):
     photo_images: list[str] | None = None
     photo_cover_index: int | None = None
 
+    @field_validator("caption")
+    @classmethod
+    def caption_fits_tiktok_utf16_limit(cls, value: str) -> str:
+        if len(value.encode("utf-16-le")) // 2 > 2200:
+            raise ValueError("Caption must not exceed 2200 UTF-16 code units")
+        return value
+
 
 class InvoiceIntentInput(BaseModel):
     idempotency_key: str = Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9._:-]+$")
@@ -99,22 +130,257 @@ class InvoiceIntentInput(BaseModel):
     model_config = {"extra": "forbid"}
 
 
+def _quota_subject(request: Request, settings: Settings) -> str:
+    cookie = request.cookies.get(COOKIE)
+    if cookie:
+        identity = "session:" + cookie
+    else:
+        identity = "client:" + (request.client.host if request.client else "unknown")
+    key_material = settings.encryption_key or settings.client_secret or "zttato-development-quota-key"
+    key = hashlib.sha256(key_material.encode("utf-8") + b"|request-quota-subject").digest()
+    return hmac.new(key, identity.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def _increment_quota(
+    session: Session,
+    *,
+    subject_hash: str,
+    scope: str,
+    limit: int,
+    window_seconds: int,
+    request_bytes: int = 0,
+    byte_limit: int | None = None,
+    now: int | None = None,
+) -> int | None:
+    timestamp = int(time.time()) if now is None else now
+    window_start = timestamp - timestamp % window_seconds
+    values = {
+        "subject_hash": subject_hash,
+        "scope": scope,
+        "window_start": window_start,
+        "request_count": 1,
+        "request_bytes": request_bytes,
+    }
+    dialect = session.get_bind().dialect.name
+    insert = pg_insert if dialect == "postgresql" else sqlite_insert if dialect == "sqlite" else None
+    if insert is None:
+        raise SQLAlchemyError("Request quotas require PostgreSQL or SQLite")
+    statement = insert(QuotaBucket).values(**values)
+    statement = statement.on_conflict_do_update(
+        index_elements=[QuotaBucket.subject_hash, QuotaBucket.scope, QuotaBucket.window_start],
+        set_={
+            "request_count": QuotaBucket.request_count + 1,
+            "request_bytes": QuotaBucket.request_bytes + request_bytes,
+        },
+    ).returning(QuotaBucket.request_count, QuotaBucket.request_bytes)
+    count, total_bytes = session.execute(statement).one()
+    if count > limit or (byte_limit is not None and total_bytes > byte_limit):
+        session.rollback()
+        return max(1, window_seconds - (timestamp - window_start))
+    session.commit()
+    return None
+
+
+def _record_request_metric(method: str, status_code: int, duration_seconds: float) -> None:
+    allowed_methods = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"}
+    key = (method if method in allowed_methods else "OTHER", status_code)
+    with _METRICS_LOCK:
+        _REQUEST_COUNT[key] += 1
+        _REQUEST_DURATION[key] += duration_seconds
+
+
+def _record_oauth_error(status_code: int) -> None:
+    if status_code >= 400:
+        with _METRICS_LOCK:
+            _OAUTH_ERRORS[status_code] += 1
+
+
+def _record_video_upload(size: int) -> None:
+    global _VIDEO_UPLOADS, _VIDEO_UPLOAD_BYTES
+    with _METRICS_LOCK:
+        _VIDEO_UPLOADS += 1
+        _VIDEO_UPLOAD_BYTES += size
+
+
+def _record_cleanup_result(result: dict[str, int | bool] | None) -> None:
+    global _CLEANUP_FILE_DELETE_FAILURES, _CLEANUP_LAST_SUCCESS
+    with _METRICS_LOCK:
+        if result is None:
+            _CLEANUP_RUNS["failure"] += 1
+            return
+        _CLEANUP_RUNS["success"] += 1
+        _CLEANUP_LAST_SUCCESS = int(time.time())
+        if not result.get("skipped_lock"):
+            for resource in (
+                "sessions",
+                "linked_accounts",
+                "oauth_requests",
+                "media_assets",
+                "publish_jobs",
+                "quota_buckets",
+            ):
+                _CLEANUP_DELETED[resource] += int(result.get(resource, 0))
+            _CLEANUP_FILE_DELETE_FAILURES += int(result.get("file_delete_failures", 0))
+
+
+def _prometheus_metrics(media_dir: str | None = None) -> str:
+    with _METRICS_LOCK:
+        counts = dict(_REQUEST_COUNT)
+        durations = dict(_REQUEST_DURATION)
+        oauth_errors = dict(_OAUTH_ERRORS)
+        video_uploads = _VIDEO_UPLOADS
+        video_upload_bytes = _VIDEO_UPLOAD_BYTES
+    lines = [
+        "# HELP zttato_http_requests_total Completed HTTP requests by method and response code.",
+        "# TYPE zttato_http_requests_total counter",
+    ]
+    for (method, status), count in sorted(counts.items()):
+        lines.append(f'zttato_http_requests_total{{method="{method}",status="{status}"}} {count}')
+    lines.extend(
+        [
+            "# HELP zttato_http_request_duration_seconds_sum Total observed request duration.",
+            "# TYPE zttato_http_request_duration_seconds_sum counter",
+        ]
+    )
+    for (method, status), duration in sorted(durations.items()):
+        lines.append(f'zttato_http_request_duration_seconds_sum{{method="{method}",status="{status}"}} {duration:.6f}')
+    lines.extend(
+        [
+            "# HELP zttato_oauth_failures_total OAuth route failures by HTTP status.",
+            "# TYPE zttato_oauth_failures_total counter",
+        ]
+    )
+    for status, count in sorted(oauth_errors.items()):
+        lines.append(f'zttato_oauth_failures_total{{status="{status}"}} {count}')
+    lines.extend(
+        [
+            "# HELP zttato_video_uploads_total Successfully stored local video uploads.",
+            "# TYPE zttato_video_uploads_total counter",
+            f"zttato_video_uploads_total {video_uploads}",
+            "# HELP zttato_video_upload_bytes_total Bytes in successfully stored local video uploads.",
+            "# TYPE zttato_video_upload_bytes_total counter",
+            f"zttato_video_upload_bytes_total {video_upload_bytes}",
+        ]
+    )
+    if media_dir:
+        try:
+            media_stat = os.statvfs(media_dir)
+            media_free = media_stat.f_bavail * media_stat.f_frsize
+            media_total = media_stat.f_blocks * media_stat.f_frsize
+        except OSError:
+            media_free = 0
+            media_total = 0
+        lines.extend(
+            [
+                "# HELP zttato_media_disk_free_bytes Bytes available to the process in the media filesystem.",
+                "# TYPE zttato_media_disk_free_bytes gauge",
+                f"zttato_media_disk_free_bytes {media_free}",
+                "# HELP zttato_media_disk_total_bytes Total bytes in the media filesystem.",
+                "# TYPE zttato_media_disk_total_bytes gauge",
+                f"zttato_media_disk_total_bytes {media_total}",
+            ]
+        )
+    with _METRICS_LOCK:
+        cleanup_runs = dict(_CLEANUP_RUNS)
+        cleanup_deleted = dict(_CLEANUP_DELETED)
+        file_delete_failures = _CLEANUP_FILE_DELETE_FAILURES
+        cleanup_last_success = _CLEANUP_LAST_SUCCESS
+    lines.extend(
+        [
+            "# HELP zttato_cleanup_runs_total Scheduled retention cleanup runs by result.",
+            "# TYPE zttato_cleanup_runs_total counter",
+        ]
+    )
+    for result, count in sorted(cleanup_runs.items()):
+        lines.append(f'zttato_cleanup_runs_total{{result="{result}"}} {count}')
+    lines.extend(
+        [
+            "# HELP zttato_cleanup_deleted_rows_total Rows removed by scheduled retention cleanup.",
+            "# TYPE zttato_cleanup_deleted_rows_total counter",
+        ]
+    )
+    for resource, count in sorted(cleanup_deleted.items()):
+        lines.append(f'zttato_cleanup_deleted_rows_total{{resource="{resource}"}} {count}')
+    lines.extend(
+        [
+            "# HELP zttato_cleanup_file_delete_failures_total Failed local upload deletions.",
+            "# TYPE zttato_cleanup_file_delete_failures_total counter",
+            f"zttato_cleanup_file_delete_failures_total {file_delete_failures}",
+            "# HELP zttato_cleanup_last_success_timestamp_seconds Unix timestamp of the last completed cleanup run.",
+            "# TYPE zttato_cleanup_last_success_timestamp_seconds gauge",
+            f"zttato_cleanup_last_success_timestamp_seconds {cleanup_last_success}",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     s = settings or load_settings()
     validate_host_config(s)
     validate_zwallet_config(s)
-    app = FastAPI(title="zTTato Creator", docs_url=None, redoc_url=None, openapi_url=None)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(s.allowed_hosts))
-    app.include_router(i18n_router)
-    app.mount("/assets", StaticFiles(directory=WEB), name="assets")
     Path(s.media_dir).mkdir(parents=True, exist_ok=True)
     if s.database_url.startswith("sqlite:///"):
         Path(s.database_url.removeprefix("sqlite:///")).parent.mkdir(parents=True, exist_ok=True)
     engine, session_factory = make_session_factory(s.database_url, bootstrap=s.env != "production")
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        stop = asyncio.Event()
+
+        async def cleanup_loop():
+            while not stop.is_set():
+                try:
+                    if s.env == "production":
+                        with session_factory() as check_session:
+                            revision = check_session.scalar(text("SELECT version_num FROM alembic_version"))
+                        if revision != MIGRATION_HEAD:
+                            LOGGER.error("retention_cleanup_skipped migration_revision_mismatch")
+                            _record_cleanup_result(None)
+                        else:
+                            result = await asyncio.to_thread(
+                                run_cleanup,
+                                session_factory,
+                                s.media_dir,
+                                media_retention_days=s.media_retention_days,
+                                record_retention_days=s.record_retention_days,
+                            )
+                            _record_cleanup_result(result)
+                    else:
+                        result = await asyncio.to_thread(
+                            run_cleanup,
+                            session_factory,
+                            s.media_dir,
+                            media_retention_days=s.media_retention_days,
+                            record_retention_days=s.record_retention_days,
+                        )
+                        _record_cleanup_result(result)
+                except Exception as exc:
+                    _record_cleanup_result(None)
+                    LOGGER.error("retention_cleanup_failed error_type=%s", type(exc).__name__)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=s.cleanup_interval_seconds)
+                except TimeoutError:
+                    pass
+
+        task = asyncio.create_task(cleanup_loop(), name="zttato-retention-cleanup")
+        _app.state.cleanup_task = task
+        try:
+            yield
+        finally:
+            stop.set()
+            await task
+            engine.dispose()
+
+    app = FastAPI(title="zTTato Creator", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(s.allowed_hosts))
+    app.include_router(i18n_router)
+    app.mount("/assets", StaticFiles(directory=WEB), name="assets")
     cipher = TokenCipher(s.encryption_key)
     app.state.tiktok = TikTokClient(s)
     app.state.zwallet = ZWalletBillingClient(s.zwallet_adapter_url, s.z_platform_service_token)
     app.state.settings = s
+    app.state.engine = engine
+    app.state.session_factory = session_factory
 
     def db():
         with session_factory() as session:
@@ -184,27 +450,125 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             original = original.replace(old, new)
         return original
 
+    def request_quota(request: Request) -> tuple[str, int, int, int, int | None] | JSONResponse | None:
+        path = request.scope.get("path", "")
+        method = request.method.upper()
+        if path.startswith("/health/") or path == "/metrics":
+            return None
+        if not (path.startswith("/api/") or path.startswith("/auth/tiktok/") or path == "/tiktok/callback"):
+            return None
+
+        raw_length = request.headers.get("content-length")
+        if raw_length is not None:
+            if not raw_length.isdecimal():
+                return JSONResponse({"detail": "Invalid Content-Length"}, status_code=400)
+            max_body = s.max_video_bytes + 1024 * 1024 if path == "/api/media" else 256 * 1024
+            if int(raw_length) > max_body:
+                return JSONResponse({"detail": "Request body exceeds the configured size limit"}, status_code=413)
+
+        if path == "/api/media" and method == "POST":
+            if raw_length is None or not raw_length.isdecimal():
+                return JSONResponse({"detail": "Content-Length is required for media uploads"}, status_code=411)
+            body_length = int(raw_length)
+            max_body = s.max_video_bytes + 1024 * 1024
+            if body_length > max_body:
+                return JSONResponse(
+                    {"detail": "Media upload exceeds the configured request size limit"}, status_code=413
+                )
+            return (
+                "upload_daily",
+                s.max_uploads_per_day,
+                86_400,
+                body_length,
+                s.max_upload_bytes_per_day,
+            )
+        if path == "/api/publish" and method == "POST":
+            return ("publish_per_minute", 6, 60, 0, None)
+        if path == "/api/creator-info":
+            return ("creator_info_per_minute", 20, 60, 0, None)
+        return ("requests_per_minute", s.max_requests_per_minute, 60, 0, None)
+
     @app.middleware("http")
-    async def hardened_headers(request: Request, call_next):
-        response = await call_next(request)
-        response.headers["X-Content-Type-Options"] = "nosniff"
-        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["X-Frame-Options"] = "DENY"
-        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-        response.headers["Content-Security-Policy"] = (
-            "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
-            "img-src 'self' data: https://tiktokcdn.com https://*.tiktokcdn.com "
-            "https://tiktokcdn-us.com https://*.tiktokcdn-us.com "
-            "https://tiktokcdn-eu.com https://*.tiktokcdn-eu.com "
-            "https://tiktokcdn-in.com https://*.tiktokcdn-in.com; "
-            "connect-src 'self'; form-action 'self'"
-        )
-        response.headers["Cache-Control"] = (
-            "no-store" if request.url.path.startswith(("/api/", "/tiktok/")) else "public, max-age=300"
-        )
-        if s.secure_cookies:
-            response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
-        return response
+    async def operational_middleware(request: Request, call_next):
+        started = perf_counter()
+        response = None
+        status_code = 500
+        scope = "public"
+        try:
+            quota = request_quota(request)
+            if isinstance(quota, JSONResponse):
+                response = quota
+            elif quota is not None:
+                scope, limit, window_seconds, request_bytes, byte_limit = quota
+                subject = _quota_subject(request, s)
+                try:
+                    with session_factory() as quota_session:
+                        retry_after = _increment_quota(
+                            quota_session,
+                            subject_hash=subject,
+                            scope=scope,
+                            limit=limit,
+                            window_seconds=window_seconds,
+                            request_bytes=request_bytes,
+                            byte_limit=byte_limit,
+                        )
+                except SQLAlchemyError:
+                    LOGGER.error("quota_storage_unavailable scope=%s", scope)
+                    response = JSONResponse({"detail": "Request quota service is unavailable"}, status_code=503)
+                else:
+                    if retry_after is not None:
+                        LOGGER.warning("request_quota_rejected scope=%s method=%s", scope, request.method)
+                        response = JSONResponse(
+                            {"detail": "Request quota exceeded"},
+                            status_code=429,
+                            headers={"Retry-After": str(retry_after)},
+                        )
+            if response is None:
+                response = await call_next(request)
+            status_code = response.status_code
+            return response
+        finally:
+            elapsed = perf_counter() - started
+            _record_request_metric(request.method, status_code, elapsed)
+            if (
+                request.scope.get("path", "").startswith("/auth/tiktok/")
+                or request.scope.get("path") == "/tiktok/callback"
+            ):
+                _record_oauth_error(status_code)
+            LOGGER.info(
+                "http_request method=%s scope=%s status=%d duration_ms=%.1f",
+                request.method,
+                scope,
+                status_code,
+                elapsed * 1000,
+            )
+            if response is not None:
+                response.headers["X-Content-Type-Options"] = "nosniff"
+                response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+                response.headers["X-Frame-Options"] = "DENY"
+                response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+                response.headers["Content-Security-Policy"] = (
+                    "default-src 'self'; base-uri 'self'; object-src 'none'; frame-ancestors 'none'; "
+                    "img-src 'self' data: https://tiktokcdn.com https://*.tiktokcdn.com "
+                    "https://tiktokcdn-us.com https://*.tiktokcdn-us.com "
+                    "https://tiktokcdn-eu.com https://*.tiktokcdn-eu.com "
+                    "https://tiktokcdn-in.com https://*.tiktokcdn-in.com; "
+                    "connect-src 'self'; form-action 'self'"
+                )
+                response.headers["Cache-Control"] = (
+                    "no-store" if request.url.path.startswith(("/api/", "/tiktok/")) else "public, max-age=300"
+                )
+                if s.secure_cookies:
+                    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+
+    @app.get("/metrics", include_in_schema=False)
+    def metrics(request: Request):
+        if not s.metrics_bearer_token:
+            raise HTTPException(404, "Not found")
+        supplied = request.headers.get("authorization", "")
+        if not secrets.compare_digest(supplied, "Bearer " + s.metrics_bearer_token):
+            raise HTTPException(404, "Not found")
+        return PlainTextResponse(_prometheus_metrics(s.media_dir), media_type="text/plain; version=0.0.4")
 
     @app.get("/", include_in_schema=False)
     def homepage():
@@ -470,6 +834,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     if size > s.max_video_bytes:
                         raise HTTPException(413, "Video exceeds 64 MiB server upload limit")
                     dest.write(chunk)
+            duration_ms = mp4_duration_ms(path)
+        except InvalidMP4 as exc:
+            path.unlink(missing_ok=True)
+            raise HTTPException(415, "Invalid or unsupported MP4 duration metadata") from exc
         except Exception:
             path.unlink(missing_ok=True)
             raise
@@ -481,10 +849,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             filename=Path(file.filename or "video.mp4").name[:200],
             size=size,
             path=str(path),
+            duration_ms=duration_ms,
         )
         session.add(asset)
         session.commit()
-        return {"media_id": item_id, "filename": asset.filename, "size": size}
+        _record_video_upload(size)
+        return {"media_id": item_id, "filename": asset.filename, "size": size, "duration_ms": duration_ms}
 
     @app.post("/api/media/photo")
     async def add_photo_media(
@@ -569,6 +939,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             options = creator.get("privacy_level_options", [])
             if payload.privacy not in options:
                 raise HTTPException(422, "Privacy selection is unavailable for this creator")
+            max_duration = creator.get("max_video_post_duration_sec")
+            if not is_photo:
+                if isinstance(max_duration, bool) or not isinstance(max_duration, int) or max_duration <= 0:
+                    raise HTTPException(502, "TikTok did not return the creator's current video duration limit")
+                duration_ms = media.duration_ms
+                if duration_ms is None:
+                    try:
+                        duration_ms = mp4_duration_ms(media.path)
+                    except (InvalidMP4, OSError) as exc:
+                        raise HTTPException(422, "Uploaded MP4 duration could not be validated") from exc
+                if duration_ms > max_duration * 1000:
+                    raise HTTPException(422, "Video exceeds this creator's current TikTok duration limit")
             if not s.app_audited and payload.privacy != "SELF_ONLY":
                 raise HTTPException(422, "Unaudited clients must use SELF_ONLY")
             if creator.get("comment_disabled") and not payload.disable_comment:
@@ -636,13 +1018,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 )
                 job.publish_id = publish_id
                 job.status = "TRANSFER_PENDING"
+            job.updated_at = int(time.time())
             session.commit()
             if not is_photo:
                 await client.upload_video(upload_url, media.path, media.size)
                 job.status = "PROCESSING"
+                job.updated_at = int(time.time())
                 session.commit()
         except Exception:
             job.status = "RECONCILIATION_REQUIRED" if job.publish_id else "INITIATION_FAILED"
+            job.updated_at = int(time.time())
             session.commit()
             raise
         return {
@@ -668,8 +1053,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if job.publish_id and (not job.checked_at or now - job.checked_at >= 30):
             linked = account(row, session)
             result = await client.status(await access(linked, session, client), job.publish_id)
-            job.status = str(result.get("status", job.status))[:40]
-            job.fail_reason = str(result.get("fail_reason", ""))[:160] or None
+            new_status = str(result.get("status", job.status))[:40]
+            new_fail_reason = str(result.get("fail_reason", ""))[:160] or None
+            if new_status != job.status or new_fail_reason != job.fail_reason:
+                job.updated_at = now
+            job.status = new_status
+            job.fail_reason = new_fail_reason
             job.checked_at = now
             session.commit()
         return {
@@ -720,7 +1109,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session.delete(job)
         assets = session.scalars(select(MediaAsset).where(MediaAsset.session_id == row.id)).all()
         for asset in assets:
-            Path(asset.path).unlink(missing_ok=True)
+            if not remove_local_upload(s.media_dir, asset.path):
+                LOGGER.error("user_data_delete_file_failed")
+                raise HTTPException(503, "Local media could not be deleted; retry the request")
             session.delete(asset)
         states = session.scalars(select(OAuthRequest).where(OAuthRequest.session_id == row.id)).all()
         for state in states:
