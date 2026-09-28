@@ -111,7 +111,15 @@
       "schedule_label": "Schedule for",
       "schedule_button": "Schedule for later",
       "summary_scheduled": "This post is scheduled for {time}. It will be sent automatically.",
-      "scheduled": "Scheduled"
+      "scheduled": "Scheduled",
+      "summary_pending_approval": "This post is awaiting team approval before it can be scheduled.",
+      "request_approval_label": "Request team approval before publishing",
+      "approval_pending": "Awaiting approval",
+      "approval_approved": "Approved",
+      "approval_rejected": "Rejected",
+      "approve_button": "Approve",
+      "reject_button": "Reject",
+      "rejection_reason_label": "Rejection reason"
     },
     "account": {
       "title": "계정 관리",
@@ -334,5 +342,15 @@
     "status_pass": "Pass",
     "status_warn": "Warning",
     "status_fail": "Fail"
+  },
+  "review": {
+    "summary_pending_approval": "This post is awaiting team approval before it can be scheduled.",
+    "request_approval_label": "Request team approval before publishing",
+    "approval_pending": "Awaiting approval",
+    "approval_approved": "Approved",
+    "approval_rejected": "Rejected",
+    "approve_button": "Approve",
+    "reject_button": "Reject",
+    "rejection_reason_label": "Rejection reason"
   }
 }

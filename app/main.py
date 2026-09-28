@@ -121,6 +121,7 @@ class PublishInput(BaseModel):
     is_aigc: bool = False
     thumbnail_timestamp: int | None = Field(default=None, ge=0)
     scheduled_at: int | None = Field(default=None, ge=0)
+    request_approval: bool = False
     media_type: str = Field(default="video", pattern="^(video|photo|photo_slideshow)$")
     photo_images: list[str] | None = None
     photo_cover_index: int | None = None
@@ -136,6 +137,14 @@ class PublishInput(BaseModel):
     def scheduled_requires_direct_mode(self):
         if self.scheduled_at is not None and self.mode != "direct":
             raise ValueError("Scheduled posts require direct mode")
+        return self
+
+    @model_validator(mode="after")
+    def approval_requires_scheduled_or_direct(self):
+        if self.request_approval and self.mode != "direct":
+            raise ValueError("Approval workflow requires direct mode")
+        if self.request_approval and self.scheduled_at is None:
+            raise ValueError("Approval workflow requires scheduled_at")
         return self
 
 
@@ -604,9 +613,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def claim_publish_job(job_id: str | None = None) -> str | None:
         now = int(time.time())
         with session_factory() as session:
-            statement = select(PublishJob).where(
-                (PublishJob.status == "QUEUED")
-                | ((PublishJob.status == "SCHEDULED") & (PublishJob.scheduled_at <= now))
+            statement = (
+                select(PublishJob)
+                .where(
+                    (PublishJob.status == "QUEUED")
+                    | ((PublishJob.status == "SCHEDULED") & (PublishJob.scheduled_at <= now))
+                )
+                .where((PublishJob.approval_status == "none") | (PublishJob.approval_status == "approved"))
             )
             if job_id:
                 statement = statement.where(PublishJob.id == job_id)
@@ -1411,6 +1424,68 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session.commit()
         return {"media_id": item_id, "filename": asset.filename, "size": asset.size}
 
+    @app.get("/api/media")
+    async def list_media(
+        request: Request,
+        row: BrowserSession = Depends(current),
+        session: Session = Depends(db),
+        limit: int = 50,
+        offset: int = 0,
+    ):
+        require_csrf(request, row)
+        account(row, session)
+        assets = session.scalars(
+            select(MediaAsset)
+            .where(MediaAsset.session_id == row.id)
+            .order_by(MediaAsset.created_at.desc())
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return {
+            "media": [
+                {
+                    "media_id": asset.id,
+                    "filename": asset.filename,
+                    "size": asset.size,
+                    "duration_ms": asset.duration_ms,
+                    "created_at": asset.created_at,
+                    "is_photo": asset.path.startswith(PHOTO_MEDIA_PREFIX),
+                }
+                for asset in assets
+            ]
+        }
+
+    @app.get("/api/media/{media_id}")
+    async def get_media(
+        media_id: str,
+        request: Request,
+        row: BrowserSession = Depends(current),
+        session: Session = Depends(db),
+    ):
+        require_csrf(request, row)
+        account(row, session)
+        asset = session.scalar(select(MediaAsset).where(MediaAsset.id == media_id, MediaAsset.session_id == row.id))
+        if not asset:
+            raise HTTPException(404, "Media not found")
+        result = {
+            "media_id": asset.id,
+            "filename": asset.filename,
+            "size": asset.size,
+            "duration_ms": asset.duration_ms,
+            "created_at": asset.created_at,
+            "is_photo": asset.path.startswith(PHOTO_MEDIA_PREFIX),
+        }
+        if asset.path.startswith(PHOTO_MEDIA_PREFIX):
+            try:
+                photo_data = cipher.decrypt(asset.path[len(PHOTO_MEDIA_PREFIX) :])
+                photo_obj = json.loads(photo_data)
+                result["photo_images"] = photo_obj.get("images", [])
+                result["photo_cover_index"] = photo_obj.get("cover_index", 0)
+            except (HTTPException, json.JSONDecodeError):
+                # Non-photo media or decryption failure; return basic info only
+                pass
+        return result
+
     @app.post("/api/publish", status_code=202)
     async def publish(
         request: Request,
@@ -1524,24 +1599,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "is_aigc",
                 "thumbnail_timestamp",
                 "scheduled_at",
+                "request_approval",
                 "media_type",
             }
         )
         initial_status = "SCHEDULED" if payload.scheduled_at else "QUEUED"
+        initial_approval = "pending" if payload.request_approval else "none"
         if retryable_failed_job:
             retryable_failed_job.status = initial_status
             retryable_failed_job.scheduled_at = payload.scheduled_at
+            retryable_failed_job.approval_status = initial_approval
             retryable_failed_job.fail_reason = None
             retryable_failed_job.request_cipher = cipher.encrypt(json.dumps(encrypted_request, ensure_ascii=False))
             retryable_failed_job.consented_at = int(time.time())
             retryable_failed_job.consent_version = PUBLISH_CONSENT_VERSION
             retryable_failed_job.checked_at = 0
             session.commit()
-            if not payload.scheduled_at:
+            if not payload.scheduled_at and not payload.request_approval:
                 background_tasks.add_task(run_queued_publish_job, retryable_failed_job.id)
             return {
                 "job_id": retryable_failed_job.id,
                 "status": initial_status,
+                "approval_status": initial_approval,
                 "idempotent_replay": True,
                 "retry_queued": True,
             }
@@ -1558,6 +1637,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             consent_version=PUBLISH_CONSENT_VERSION,
             request_cipher=cipher.encrypt(json.dumps(encrypted_request, ensure_ascii=False)),
             scheduled_at=payload.scheduled_at,
+            approval_status=initial_approval,
         )
         session.add(job)
         try:
@@ -1619,6 +1699,72 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": job.status,
             "fail_reason": job.fail_reason,
             "mode": job.mode,
+            "approval_status": job.approval_status,
+            "approved_at": job.approved_at,
+            "rejection_reason": job.rejection_reason,
+        }
+
+    @app.post("/api/jobs/{job_id}/approve")
+    async def approve_job(
+        job_id: str,
+        request: Request,
+        background_tasks: BackgroundTasks,
+        row: BrowserSession = Depends(current),
+        session: Session = Depends(db),
+    ):
+        require_csrf(request, row)
+        job = session.scalar(select(PublishJob).where(PublishJob.id == job_id, PublishJob.session_id == row.id))
+        if not job:
+            raise HTTPException(404, "Job not found")
+        if job.approval_status != "pending":
+            raise HTTPException(400, "Job is not awaiting approval")
+        now = int(time.time())
+        job.approval_status = "approved"
+        job.approved_by = row.id
+        job.approved_at = now
+        job.updated_at = now
+        if job.status == "SCHEDULED" and job.scheduled_at and job.scheduled_at <= now + 900:
+            job.status = "QUEUED"
+        session.commit()
+        if job.status == "QUEUED":
+            background_tasks.add_task(run_queued_publish_job, job.id)
+        return {
+            "job_id": job.id,
+            "approval_status": job.approval_status,
+            "status": job.status,
+            "approved_at": job.approved_at,
+        }
+
+    @app.post("/api/jobs/{job_id}/reject")
+    async def reject_job(
+        job_id: str,
+        request: Request,
+        row: BrowserSession = Depends(current),
+        session: Session = Depends(db),
+    ):
+        require_csrf(request, row)
+        body = await request.json()
+        reason = (body.get("reason") or "").strip()
+        if not reason:
+            raise HTTPException(422, "Rejection reason is required")
+        if len(reason) > 500:
+            raise HTTPException(422, "Rejection reason too long (max 500 characters)")
+        job = session.scalar(select(PublishJob).where(PublishJob.id == job_id, PublishJob.session_id == row.id))
+        if not job:
+            raise HTTPException(404, "Job not found")
+        if job.approval_status != "pending":
+            raise HTTPException(400, "Job is not awaiting approval")
+        now = int(time.time())
+        job.approval_status = "rejected"
+        job.rejection_reason = reason
+        job.status = "DRAFT"
+        job.updated_at = now
+        session.commit()
+        return {
+            "job_id": job.id,
+            "approval_status": job.approval_status,
+            "status": job.status,
+            "rejection_reason": job.rejection_reason,
         }
 
     @app.post("/api/disconnect")
