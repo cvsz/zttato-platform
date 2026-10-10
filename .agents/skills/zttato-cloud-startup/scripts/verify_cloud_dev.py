@@ -7,6 +7,11 @@ cookies = CookieJar()
 client = build_opener(HTTPCookieProcessor(cookies))
 
 
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(f"Smoke verification failed: {message}")
+
+
 def get(path):
     with client.open("http://127.0.0.1:8000" + path, timeout=8) as response:
         return response.status, response.headers, response.read()
@@ -22,25 +27,25 @@ def has_token_key(value):
 
 for path, status_value in (("/health/live", "ok"), ("/health/ready", "ready")):
     code, _, body = get(path)
-    assert code == 200 and json.loads(body).get("status") == status_value, path
+    require(code == 200 and json.loads(body).get("status") == status_value, path)
     print("PASS", path)
 
 for path in ("/", "/dashboard", "/review-preview", "/privacy-policy", "/terms-of-service"):
     code, headers, _ = get(path)
-    assert code == 200, path
-    assert headers.get("X-Content-Type-Options") and headers.get("X-Frame-Options"), path
+    require(code == 200, path + " status")
+    require(bool(headers.get("X-Content-Type-Options") and headers.get("X-Frame-Options")), path + " headers")
     print("PASS", path)
 
-code, headers, body = get("/api/session")
+code, _, body = get("/api/session")
 payload = json.loads(body)
-assert code == 200 and payload.get("connected") is False and not has_token_key(payload)
+require(code == 200 and payload.get("connected") is False and not has_token_key(payload), "session payload")
 sessions = [cookie for cookie in cookies if cookie.name == "zttato_session"]
-assert len(sessions) == 1
+require(len(sessions) == 1, "session cookie issuance")
 original_value = sessions[0].value
 
 code, headers, body = get("/api/session")
 payload = json.loads(body)
-assert code == 200 and payload.get("connected") is False and not has_token_key(payload)
-assert not headers.get_all("Set-Cookie")
-assert any(cookie.name == "zttato_session" and cookie.value == original_value for cookie in cookies)
+require(code == 200 and payload.get("connected") is False and not has_token_key(payload), "session reuse payload")
+require(not headers.get_all("Set-Cookie"), "unexpected cookie reissue")
+require(any(cookie.name == "zttato_session" and cookie.value == original_value for cookie in cookies), "cookie reuse")
 print("PASS /api/session")
