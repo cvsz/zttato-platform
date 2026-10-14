@@ -1,7 +1,7 @@
 fastapi==0.141.1
 uvicorn==0.53.0
 SQLAlchemy==2.0.54
-alembic>=1.18,<1.20
+alembic>=1.20.0,<1.21
 httpx==0.28.1
 cryptography==50.0.1
 python-multipart==0.0.32
