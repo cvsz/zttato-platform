@@ -1,4 +1,4 @@
-FROM python:3.14-alpine3.23
+FROM python:3.15-alpine3.23
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /srv
 RUN addgroup -S zttato && adduser -S -G zttato -h /srv zttato && mkdir -p /srv/data /srv/media && chown -R zttato:zttato /srv
