@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+"""GitHub CLI extension for listing and switching stored GitHub accounts."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Account:
+    hostname: str
+    login: str
+    active: bool
+    state: str
+
+
+class ExtensionError(Exception):
+    pass
+
+
+def _clean(value: str) -> str:
+    return "".join(char if char.isprintable() else "?" for char in value)
+
+
+def _safe_hostname(value: str) -> str:
+    hostname = value.strip()
+    if (
+        not hostname
+        or len(hostname) > 253
+        or not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?", hostname)
+        or ".." in hostname
+    ):
+        raise ExtensionError("Hostname must be a hostname without a scheme, path, port, or credentials")
+    return hostname
+
+
+def _gh_executable() -> str:
+    executable = os.environ.get("GH_PATH") or shutil.which("gh")
+    if not executable:
+        raise ExtensionError("GitHub CLI (`gh`) was not found on PATH")
+    return executable
+
+
+def _run_gh(*arguments: str) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            [_gh_executable(), *arguments],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise ExtensionError("GitHub CLI command timed out after 30 seconds") from exc
+    except OSError as exc:
+        raise ExtensionError("Could not start GitHub CLI (`gh`)") from exc
+
+
+def _load_accounts() -> list[Account]:
+    result = _run_gh("auth", "status", "--json", "hosts")
+    if result.returncode != 0:
+        raise ExtensionError("`gh auth status --json hosts` failed; inspect `gh auth status` directly")
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise ExtensionError(
+            "Could not parse GitHub CLI auth status; upgrade `gh` to a version supporting `--json hosts`"
+        ) from exc
+
+    hosts = payload.get("hosts") if isinstance(payload, dict) else None
+    if not isinstance(hosts, dict):
+        raise ExtensionError("GitHub CLI returned an unexpected auth status format")
+
+    accounts: list[Account] = []
+    for configured_host, entries in hosts.items():
+        if not isinstance(configured_host, str) or not isinstance(entries, list):
+            raise ExtensionError("GitHub CLI returned an unexpected auth status format")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ExtensionError("GitHub CLI returned an unexpected auth status format")
+            login = entry.get("login")
+            if not isinstance(login, str) or not login:
+                continue
+            entry_host = entry.get("host")
+            hostname = entry_host if isinstance(entry_host, str) and entry_host else configured_host
+            state = entry.get("state")
+            accounts.append(
+                Account(
+                    hostname=hostname,
+                    login=login,
+                    active=entry.get("active") is True,
+                    state=(
+                        state
+                        if isinstance(state, str) and state in {"success", "error", "timeout"}
+                        else "unknown"
+                    ),
+                )
+            )
+    return sorted(accounts, key=lambda account: (account.hostname.casefold(), account.login.casefold()))
+
+
+def _matches_host(account: Account, hostname: str | None) -> bool:
+    return hostname is None or account.hostname.casefold().rstrip(".") == hostname.casefold().rstrip(".")
+
+
+def _state_label(account: Account) -> str:
+    return {
+        "success": "authenticated",
+        "error": "authentication error",
+        "timeout": "status check timed out",
+        "unknown": "unknown status",
+    }[account.state]
+
+
+def _print_accounts(accounts: list[Account]) -> None:
+    if not accounts:
+        print("No GitHub CLI accounts found. Run `gh auth login` to add an account.")
+        return
+
+    rows = [
+        (
+            _clean(account.hostname),
+            "@" + _clean(account.login),
+            ("active · " if account.active else "") + _state_label(account),
+        )
+        for account in accounts
+    ]
+    host_width = min(max(len("HOST"), *(len(row[0]) for row in rows)), 40)
+    login_width = min(max(len("ACCOUNT"), *(len(row[1]) for row in rows)), 40)
+
+    def fit(value: str, width: int) -> str:
+        return value if len(value) <= width else value[: width - 1] + "…"
+
+    print(f"{'HOST':<{host_width}}  {'ACCOUNT':<{login_width}}  STATUS")
+    for hostname, login, status in rows:
+        print(f"{fit(hostname, host_width):<{host_width}}  {fit(login, login_width):<{login_width}}  {status}")
+
+
+def _token_override_names(hostname: str) -> tuple[str, ...]:
+    normalized = hostname.casefold().rstrip(".")
+    if normalized == "github.com" or normalized.endswith(".ghe.com"):
+        candidates = ("GH_TOKEN", "GITHUB_TOKEN")
+    else:
+        candidates = ("GH_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN")
+    return tuple(name for name in candidates if name in os.environ)
+
+
+def _choose_account(accounts: list[Account], login: str | None, hostname: str | None) -> Account:
+    candidates = [account for account in accounts if _matches_host(account, hostname)]
+    if login is not None:
+        candidates = [account for account in candidates if account.login.casefold() == login.casefold()]
+        if not candidates:
+            shown_login = _clean(login)
+            host_hint = f" on {_clean(hostname)}" if hostname else ""
+            raise ExtensionError(f"No GitHub CLI account named @{shown_login}{host_hint} was found")
+        if len(candidates) > 1:
+            raise ExtensionError("That login exists more than once; specify `--hostname`")
+        return candidates[0]
+
+    if not candidates:
+        raise ExtensionError("No GitHub accounts are available to switch")
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        raise ExtensionError("Pass a login when not running in a terminal: `gh accounts switch LOGIN`")
+
+    _print_accounts(candidates)
+    try:
+        selection = input("Select account number: ").strip()
+    except EOFError as exc:
+        raise ExtensionError("No account was selected") from exc
+    if not selection.isdigit() or not 1 <= int(selection) <= len(candidates):
+        raise ExtensionError("Selection must be one of the listed account numbers")
+    return candidates[int(selection) - 1]
+
+
+def _list(args: argparse.Namespace) -> int:
+    hostname = _safe_hostname(args.hostname) if args.hostname else None
+    accounts = [account for account in _load_accounts() if _matches_host(account, hostname)]
+    _print_accounts(accounts)
+    return 0
+
+
+def _current(args: argparse.Namespace) -> int:
+    hostname = _safe_hostname(args.hostname) if args.hostname else None
+    accounts = [account for account in _load_accounts() if account.active and _matches_host(account, hostname)]
+    if not accounts:
+        target = f" for {_clean(hostname)}" if hostname else ""
+        print(f"No active GitHub CLI account{target}.", file=sys.stderr)
+        return 1
+    for account in accounts:
+        print(f"{_clean(account.hostname)}  @{_clean(account.login)}  ({_state_label(account)})")
+    return 0
+
+
+def _switch(args: argparse.Namespace) -> int:
+    hostname = _safe_hostname(args.hostname) if args.hostname else None
+    account = _choose_account(_load_accounts(), args.login, hostname)
+    overrides = _token_override_names(account.hostname)
+    if overrides:
+        names = ", ".join(overrides)
+        raise ExtensionError(
+            f"{names} overrides stored credentials for {_clean(account.hostname)}. "
+            "Unset the variable before switching; this extension did not display or change its value."
+        )
+
+    result = _run_gh("auth", "switch", "--hostname", account.hostname, "--user", account.login)
+    if result.returncode != 0:
+        raise ExtensionError(
+            f"`gh auth switch` failed for {_clean(account.hostname)}; check `gh auth status` and retry"
+        )
+    print(f"Switched {_clean(account.hostname)} to @{_clean(account.login)}.")
+    return 0
+
+
+def _add_hostname_option(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--hostname", metavar="HOST", help="GitHub host (defaults to matching accounts on any host)")
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="gh accounts", description="List and switch GitHub CLI accounts")
+    parser.set_defaults(hostname=None)
+    commands = parser.add_subparsers(dest="command")
+
+    list_parser = commands.add_parser("list", help="list stored accounts")
+    _add_hostname_option(list_parser)
+
+    current_parser = commands.add_parser("current", help="show the active account")
+    _add_hostname_option(current_parser)
+
+    switch_parser = commands.add_parser("switch", help="switch the active account")
+    switch_parser.add_argument("login", nargs="?", help="login to activate; prompts in a terminal if omitted")
+    _add_hostname_option(switch_parser)
+    return parser
+
+
+def main() -> int:
+    parser = _parser()
+    args = parser.parse_args()
+    try:
+        if args.command in (None, "list"):
+            return _list(args)
+        if args.command == "current":
+            return _current(args)
+        if args.command == "switch":
+            return _switch(args)
+        parser.error("unknown command")
+    except ExtensionError as exc:
+        print(f"gh accounts: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("gh accounts: cancelled", file=sys.stderr)
+        return 130
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

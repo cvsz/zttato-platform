@@ -1,5 +1,9 @@
 # TikTok App Review Evidence
 
+## Reviewer follow-up — 2026-10-06
+
+The latest reviewer decision requests updated Terms of Service, Privacy Policy and Website URL. The reviewer reports that the Website URL is invalid or inaccessible. Current external checks confirm a blocker: the homepage, both legal pages, their static assets and the TikTok site-verification path return HTTP 530 with Cloudflare error 1033. Record this as `BLOCKED_EXTERNAL`; do not treat the older domain checks below as current evidence.
+
 ## Portal configuration
 - Web/Desktop URL: https://zttato.zeaz.dev/
 - Redirect URI: https://zttato.zeaz.dev/tiktok/callback
@@ -47,9 +51,12 @@ Use /dashboard to perform the actual authenticated flow. /review-preview remains
 - `Share Kit` - not implemented (web-only app)
 
 ## Domain verification
-- Domain: `zttato.zeaz.dev` ✅
-- URL prefix: `https://zttato.zeaz.dev/tiktok/uploading/` ✅
-- URL prefix: `https://zttato.zeaz.dev/tiktok/video/` ✅
+
+- Domain: `zttato.zeaz.dev` — `BLOCKED_EXTERNAL` as of 2026-10-06; public requests currently fail at the Cloudflare Tunnel edge with error 1033.
+- URL prefix: `https://zttato.zeaz.dev/tiktok/uploading/` — `BLOCKED_EXTERNAL`; expected verification body remains `tiktok-developers-site-verification=9WurARgpbnJkdus0r4bfvSZydNYNxKUC` after the route is reachable.
+- URL prefix: `https://zttato.zeaz.dev/tiktok/video/` — not rechecked because the same public origin is unavailable.
+
+Recheck each URL from outside the origin after restoring the tunnel. Require successful HTTPS responses and the expected verification body before recording a pass.
 
 ## Basic profile and dashboard integrity
 

@@ -549,7 +549,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app = FastAPI(title="zTTato Creator", docs_url=None, redoc_url=None, openapi_url=None, lifespan=lifespan)
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=list(s.allowed_hosts))
     app.include_router(i18n_router)
-    app.mount("/assets", StaticFiles(directory=WEB), name="assets")
+    app.mount("/assets", StaticFiles(directory=WEB / "assets"), name="assets")
     cipher = TokenCipher(s.encryption_key)
     app.state.tiktok = TikTokClient(s)
     app.state.zwallet = ZWalletBillingClient(s.zwallet_adapter_url, s.z_platform_service_token)
@@ -809,12 +809,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.set_cookie(COOKIE, raw, max_age=86400, secure=s.secure_cookies, httponly=True, samesite="lax")
         response.set_cookie(CSRF, csrf, max_age=86400, secure=s.secure_cookies, httponly=False, samesite="lax")
 
-    def safe_legal(page: str) -> str:
+    def render_public_page(page: str) -> str:
         original = (WEB / page).read_text("utf-8")
+        phone_line = ""
+        if s.legal_phone:
+            phone = html.escape(s.legal_phone)
+            phone_line = f' · Phone: <a href="tel:{phone}">{phone}</a>'
+        contact_name_line = ""
+        if s.legal_contact_name:
+            contact_name_line = html.escape(s.legal_contact_name) + "<br>"
         values = {
             "{{LEGAL_ENTITY}}": html.escape(s.legal_entity or "Legal operator details pending"),
             "{{LEGAL_EMAIL}}": html.escape(s.legal_email or "Contact details pending"),
             "{{LEGAL_ADDRESS}}": html.escape(s.legal_address or "Address pending legal review"),
+            "{{LEGAL_PHONE_LINE}}": phone_line,
+            "{{LEGAL_CONTACT_NAME_LINE}}": contact_name_line,
+            "{{MEDIA_RETENTION_DAYS}}": str(s.media_retention_days),
+            "{{RECORD_RETENTION_DAYS}}": str(s.record_retention_days),
         }
         for old, new in values.items():
             original = original.replace(old, new)
@@ -955,7 +966,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", include_in_schema=False)
     def homepage():
-        return FileResponse(WEB / "index.html")
+        return HTMLResponse(render_public_page("index.html"))
 
     @app.get("/dashboard", include_in_schema=False)
     def dashboard():
@@ -967,11 +978,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/privacy-policy", include_in_schema=False)
     def privacy_policy():
-        return HTMLResponse(safe_legal("privacy-policy.html"))
+        return HTMLResponse(render_public_page("privacy-policy.html"))
 
     @app.get("/terms-of-service", include_in_schema=False)
     def terms_of_service():
-        return HTMLResponse(safe_legal("terms-of-service.html"))
+        return HTMLResponse(render_public_page("terms-of-service.html"))
 
     @app.get("/tiktok/uploading/", include_in_schema=False)
     def tiktok_site_verification():

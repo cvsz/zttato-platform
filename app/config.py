@@ -41,6 +41,8 @@ class Settings:
     legal_address: str
     media_dir: str
     max_video_bytes: int
+    legal_phone: str = ""
+    legal_contact_name: str = ""
     zwallet_adapter_url: str = ""
     z_platform_service_token: str = ""
     max_requests_per_minute: int = 120
@@ -264,11 +266,16 @@ def load_settings() -> Settings:
             if x.strip()
         ),
         app_audited=get("TIKTOK_APP_AUDITED", "false").lower() == "true",
-        legal_entity=get("LEGAL_ENTITY", ""),
-        legal_email=get("LEGAL_CONTACT_EMAIL", ""),
-        legal_address=get("LEGAL_POSTAL_ADDRESS", ""),
+        legal_entity=get("LEGAL_ENTITY", "ZEAZDEV COMPANY LIMITED"),
+        legal_email=get("LEGAL_CONTACT_EMAIL", "sea@zeaz.dev"),
+        legal_address=get(
+            "LEGAL_POSTAL_ADDRESS",
+            "125/65 Soi Watdongmoonlek, Bandchanglor, Bangkok Noi, Bangkok, 10700",
+        ),
         media_dir=get("MEDIA_DIR", "./media"),
         max_video_bytes=int(get("MAX_VIDEO_BYTES", "67108864")),
+        legal_phone=get("LEGAL_CONTACT_PHONE", "+66936537081").strip(),
+        legal_contact_name=get("LEGAL_CONTACT_NAME", "PHIPHAT PHOEMSUK").strip(),
         zwallet_adapter_url=get("ZWALLET_ADAPTER_URL", "").strip().rstrip("/"),
         z_platform_service_token=get("Z_PLATFORM_SERVICE_TOKEN", ""),
         max_requests_per_minute=int(get("MAX_REQUESTS_PER_MINUTE", "120")),

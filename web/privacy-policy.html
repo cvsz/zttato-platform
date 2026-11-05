@@ -1,14 +1,64 @@
 <!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Privacy Policy · zTTato Creator</title><link rel="icon" href="/assets/icon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/styles.css">
-<script src="/assets/i18n.js" defer></script>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Privacy Policy · zTTato Creator</title>
+  <meta name="description" content="How zTTato Creator handles TikTok account, publishing, session and uploaded media information.">
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script src="/assets/i18n.js" defer></script>
 </head>
-<body><main class="shell legal"><header class="nav"><a class="brand" href="/"><img src="/assets/icon.svg" alt=""><span data-i18n="app.name">zTTato Creator</span></a><nav><a href="/" data-i18n="nav.home">Home</a><a href="/terms-of-service" data-i18n="nav.terms">Terms</a></nav><div class="lang-selector"><select class="lang-select" id="lang-select" aria-label="Select language"><option value="en">English</option><option value="th">ไทย</option><option value="zh">中文</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="vi">Tiếng Việt</option></select></div></header><h1 data-i18n="nav.privacy">Privacy Policy</h1><p><strong>Last updated:</strong> 24 September 2026</p>
-<p>This policy describes how {{LEGAL_ENTITY}} ("zTTato", "we") handles information when you use zTTato Creator.</p>
-<h2>Information we process</h2><p>When you authorize TikTok, we receive authorization tokens and basic account identifiers/scopes approved by you. When you upload content, we process the video file, filename, publishing settings, publishing identifiers and operational status needed to perform your request.</p>
-<h2>How we use information</h2><p>We use information to provide TikTok Login Kit and Content Posting API functions, maintain security, prevent duplicate publishing, diagnose failures and respond to support or legal requests. We do not ask for or store your TikTok password.</p>
-<h2>Sharing</h2><p>We transfer content and requested metadata to TikTok only when you initiate and explicitly confirm the applicable action. We may use infrastructure providers acting on our instructions as processors. We do not sell personal information.</p>
-<h2>Retention and deletion</h2><p>Authorization and operational records are retained only as needed for the service, security, legal obligations and recovery. Uploaded local files should be removed under the operational retention policy. You may disconnect TikTok and request deletion through the application or contact us.</p>
-<h2>Security</h2><p>Tokens are stored server-side and encrypted at rest. Production deployments require HTTPS, access controls, secret management, monitoring, backups and tested recovery procedures.</p>
-<h2>Your choices</h2><p>You control whether to connect TikTok, which permissions to grant, whether to upload a draft or directly post, and the current publishing options TikTok makes available to your account.</p>
-<h2>Contact</h2><p>{{LEGAL_ENTITY}}<br>{{LEGAL_ADDRESS}}<br>Email: {{LEGAL_EMAIL}}</p>
-<p>This document must be reviewed against the operator's actual practices and applicable law before production use.</p></main></body></html>
+<body>
+  <main class="shell legal">
+    <header class="nav">
+      <a class="brand" href="/"><img src="/assets/icon.svg" alt=""><span data-i18n="app.name">zTTato Creator</span></a>
+      <nav><a href="/" data-i18n="nav.home">Home</a><a href="/terms-of-service" data-i18n="nav.terms">Terms</a></nav>
+      <div class="lang-selector"><select class="lang-select" id="lang-select" aria-label="Select language"><option value="en">English</option><option value="th">ไทย</option><option value="zh">中文</option><option value="ja">日本語</option><option value="ko">한국어</option><option value="vi">Tiếng Việt</option></select></div>
+    </header>
+
+    <h1 data-i18n="nav.privacy">Privacy Policy</h1>
+    <p><strong>Last updated:</strong> 6 October 2026</p>
+    <p>This policy explains how {{LEGAL_ENTITY}} (“zTTato”, “we”, “us”) handles information when you use zTTato Creator. For questions or requests, use the contact details at the end of this policy.</p>
+
+    <h2>Information we process</h2>
+    <ul>
+      <li><strong>TikTok authorization:</strong> your TikTok account identifier, the permissions you grant, authorization tokens and their expiry times. Tokens are stored on our server in encrypted form. zTTato does not ask for or store your TikTok password.</li>
+      <li><strong>Basic profile:</strong> when you open the creator dashboard, we request your TikTok display name and avatar and show them in the dashboard. The application does not save those profile fields in its database.</li>
+      <li><strong>Content and publishing:</strong> video files, filenames, file size and duration; photo URLs when you choose a supported photo flow; and the caption, visibility, disclosure, interaction, schedule and other settings you select. We also process publishing identifiers and status so you can check a request.</li>
+      <li><strong>Session and security:</strong> essential browser session and CSRF cookies, short-lived authorization state, and limited technical data used to protect the service and prevent abusive or duplicate requests.</li>
+      <li><strong>Optional billing:</strong> if invoice intents are enabled and you request one, the application sends a session-scoped identifier, idempotency key, currency and amount to the configured billing service. The invoice-intent endpoint does not collect payment-card numbers or payment credentials.</li>
+    </ul>
+
+    <h2>How we use information</h2>
+    <p>We use this information to authorize your account, display the basic profile you requested, store and transfer content you select, carry out the publishing action you confirm, show its status, prevent duplicate requests, protect the service and respond to support or legal requests.</p>
+
+    <h2>When information is shared</h2>
+    <p>When you connect TikTok, information is exchanged with TikTok to complete authorization and retrieve the basic profile fields described above. We send your selected content and publishing settings to TikTok only when you initiate the applicable upload or post flow and confirm the request. TikTok handles that information under its own terms and privacy policy.</p>
+    <p>We use infrastructure providers to operate the application and store its data. If the optional invoice-intent flow is enabled, the configured billing service receives only the fields described above for that request. Service providers process information to provide their services to us. We do not sell personal information.</p>
+
+    <h2>Retention</h2>
+    <ul>
+      <li>OAuth authorization state expires after 15 minutes. Browser sessions expire after 24 hours.</li>
+      <li>The configured media-cleanup threshold is {{MEDIA_RETENTION_DAYS}} days. Media may be deleted earlier when its session expires or you delete your zTTato data. A pending or uncertain publishing request may delay cleanup while its status is needed for safe recovery.</li>
+      <li>Terminal publishing records use a configured retention period of {{RECORD_RETENTION_DAYS}} days. Records needed to resolve an unfinished publishing request may remain while that recovery is pending.</li>
+      <li>Abuse-prevention quota counters are removed after two days. Automated cleanup runs periodically, so a cleanup failure can delay deletion.</li>
+    </ul>
+    <p>If the operator maintains recovery backups, information removed from the live service may remain in those copies until they expire under the separate backup-retention schedule. Backups are used for service recovery.</p>
+
+    <h2>Your choices and deletion</h2>
+    <p>You choose whether to connect TikTok, which permissions to grant, what content to upload, and whether to request a draft or a direct post. You can disconnect TikTok or use the dashboard’s “Delete zTTato account data” control to remove the application’s linked-account data, publishing records and uploaded local files. Deletion also attempts to revoke TikTok authorization. If TikTok revocation is unavailable, revoke zTTato from your TikTok account settings as well.</p>
+    <p>You may contact us to ask questions or request access to or deletion of information associated with your use of the service. We may need to retain limited information where required by law or to resolve a security, legal or publishing-recovery issue.</p>
+
+    <h2>Security</h2>
+    <p>We use server-side access controls and encrypt TikTok authorization tokens at rest. The service is designed to use HTTPS in staging and production. No internet service can guarantee absolute security.</p>
+
+    <h2>Changes to this policy</h2>
+    <p>We will update the date above when this policy changes. Material changes will be communicated through the service where appropriate.</p>
+
+    <h2>Contact</h2>
+    <p>{{LEGAL_CONTACT_NAME_LINE}}{{LEGAL_ENTITY}}<br>{{LEGAL_ADDRESS}}<br>Email: <a href="mailto:{{LEGAL_EMAIL}}">{{LEGAL_EMAIL}}</a>{{LEGAL_PHONE_LINE}}</p>
+    <footer><a href="/">zTTato Creator</a> · <a href="/terms-of-service">Terms of Service</a></footer>
+  </main>
+</body>
+</html>

@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 
-const i18nSource = readFileSync(new URL("../web/i18n.js", import.meta.url), "utf8");
+const i18nSource = readFileSync(new URL("../web/assets/i18n.js", import.meta.url), "utf8");
 const enJson = JSON.parse(readFileSync(new URL("../app/i18n/en.json", import.meta.url), "utf8"));
 const thJson = JSON.parse(readFileSync(new URL("../app/i18n/th.json", import.meta.url), "utf8"));
 

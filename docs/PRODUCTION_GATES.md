@@ -44,8 +44,8 @@ Do not infer production readiness from source-code existence, documentation, moc
 
 - [ ] Main branch ruleset/protection requires review and green CI/security checks.
 - [ ] Production environment validation passes with HTTPS, PostgreSQL and persistent encryption key.
-- [ ] Cloudflare/edge route exposes required public/legal/callback routes while admin surfaces remain protected.
-- [ ] Legal entity, contact and postal address are real and counsel has reviewed public policies.
+- [ ] Cloudflare/edge route exposes required public/legal/callback routes while admin surfaces remain protected. **Status: `BLOCKED_EXTERNAL`** — on 2026-10-06 the public homepage, legal pages, assets and TikTok verification route returned HTTP 530 / Cloudflare error 1033.
+- [ ] Legal entity, contact and postal address are real and counsel has reviewed public policies. **Status: `NOT_TESTED`** — operator details have been supplied, but production configuration and legal review remain unverified.
 - [x] PostgreSQL backup plus isolated restore is executed and timestamped (isolated synthetic staging only).
 - [x] Media retention/deletion behavior is verified (isolated synthetic staging only).
 - [x] Known-good container/image rollback is executed and timestamped (isolated synthetic staging only).
@@ -81,11 +81,11 @@ Do not infer production readiness from source-code existence, documentation, moc
 
 Affiliate readiness is independent of TikTok readiness.
 
-- [ ] Canonical Product model is source-neutral.
+- [x] Canonical Product model is source-neutral.
 - [ ] Commerce provider IDs are not used as internal Product IDs.
-- [ ] Product and Offer are separate concepts.
-- [ ] Affiliate Links are independent of a specific distribution platform.
-- [ ] Campaigns and content are platform-neutral.
+- [x] Product and Offer are separate concepts.
+- [x] Affiliate Links are independent of a specific distribution platform.
+- [x] Campaigns and content are platform-neutral.
 - [ ] Media assets are reusable across distribution providers.
 - [ ] Affiliate analytics are independent of TikTok availability.
 - [ ] Affiliate functionality remains operational when TikTok is disabled/unavailable.

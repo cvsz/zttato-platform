@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { runInNewContext } from "node:vm";
 
 const html = readFileSync(new URL("../web/dashboard.html", import.meta.url), "utf8");
-const javascript = readFileSync(new URL("../web/dashboard.js", import.meta.url), "utf8");
+const javascript = readFileSync(new URL("../web/assets/dashboard.js", import.meta.url), "utf8");
 
 function dashboard({
   missing = [],

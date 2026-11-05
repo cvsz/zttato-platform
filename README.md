@@ -51,12 +51,16 @@ Affiliate Analytics
 
 Python 3.12+, FastAPI, SQLAlchemy, PostgreSQL 17, HTTPX, server-rendered legal pages and vanilla JS UI.
 
+## GitHub CLI helper
+
+An optional GitHub CLI extension source is available in [`plugins/gh-accounts`](plugins/gh-accounts/README.md). It lists and switches accounts already authenticated with `gh`; it never retrieves, stores, or prints token values and does not change zTTato application authentication. The extension source is not published as a standalone GitHub repository.
+
 ## Local Setup
 
 1. Copy `.env.example` to `.env`.
 2. Generate `APP_ENCRYPTION_KEY` using:
    `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`
-3. Enter your own real TikTok Client Key/Secret and legal entity/contact/address values. Never commit `.env`.
+3. Enter your real TikTok Client Key/Secret and confirm the public legal/contact details match the registered operator. Never commit `.env`.
 4. Local app: `pip install -r requirements-dev.txt && uvicorn app.main:app --reload`
 5. PostgreSQL: `docker compose up --build -d`
 6. App: `/`

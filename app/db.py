@@ -12,7 +12,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
-MIGRATION_HEAD = "20260927_04"
+MIGRATION_HEAD = "3265a81b5c79"
 
 
 class Base(DeclarativeBase):
@@ -92,6 +92,59 @@ class QuotaBucket(Base):
     request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     request_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     __table_args__ = (PrimaryKeyConstraint("subject_hash", "scope", "window_start", name="pk_request_quota_buckets"),)
+
+
+class Merchant(Base):
+    __tablename__ = "merchants"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+
+
+class Product(Base):
+    __tablename__ = "products"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+
+
+class ProductSource(Base):
+    __tablename__ = "product_sources"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), index=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(200), nullable=False)
+    __table_args__ = (UniqueConstraint("provider", "external_id", name="uq_product_source_provider_ext"),)
+
+
+class Offer(Base):
+    __tablename__ = "offers"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    product_id: Mapped[str] = mapped_column(ForeignKey("products.id"), index=True)
+    merchant_id: Mapped[int] = mapped_column(ForeignKey("merchants.id"), index=True)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False)
+    price_minor: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    commission_rate_bps: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    availability_status: Mapped[str] = mapped_column(String(50), default="active")
+    destination_url: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+
+
+class Campaign(Base):
+    __tablename__ = "campaigns"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    status: Mapped[str] = mapped_column(String(50), default="draft")
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
+
+
+class AffiliateLink(Base):
+    __tablename__ = "affiliate_links"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    offer_id: Mapped[str] = mapped_column(ForeignKey("offers.id"), index=True)
+    campaign_id: Mapped[str | None] = mapped_column(ForeignKey("campaigns.id"), nullable=True, index=True)
+    tracking_code: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    created_at: Mapped[int] = mapped_column(Integer, default=lambda: int(time.time()))
 
 
 def make_session_factory(database_url: str, *, bootstrap: bool = True):
